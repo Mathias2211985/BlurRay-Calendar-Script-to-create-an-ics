@@ -130,17 +130,48 @@ python -u .\python --year 2025 --calendar-template "https://..." --months 01
 
 - Wenn der Crawl lange dauert: erhöhe `--max-pages` oder begrenze mit `--months` nur auf benötigte Monate.
 
+- Wenn PowerShell lokale Skripte blockiert (ExecutionPolicy), kannst du die Policy für einen einmaligen Start umgehen, ohne die System‑Einstellung zu ändern:
+
+```powershell
+powershell -NoProfile -ExecutionPolicy Bypass -File .\run_scraper.ps1
+```
+
+Du kannst damit auch direkt Parameter übergeben (non‑interactive):
+
+```powershell
+powershell -NoProfile -ExecutionPolicy Bypass -File .\run_scraper.ps1 -Years '2025' -Months '01,02' -OutPattern 'bluray_{year}_{months}.ics'
+```
+
+## Vordefinierte Template‑Pfade auf bluray-disc.de
+
+Auf bluray-disc.de gibt es verschiedene Bereichs‑/Kategorie‑Slugs, die du in deinen Template‑URLs verwenden kannst. Die folgenden Slugs werden häufig auf der Seite verwendet und sind direkt für das `--calendar-template` oder als Listing‑Basis nutzbar:
+
+- `blu-ray-filme`
+- `3d-blu-ray-filme`
+- `4k-uhd`
+- `serien`
+- `blu-ray-importe`
+
+Gängige Template‑Formen (ersetze `{slug}` durch einen der Slugs oben):
+
+```text
+# Monatsbasiertes Kalender‑Template (empfohlen)
+https://bluray-disc.de/{slug}/kalender?id={year}-{month:02d}
+
+# Paginierte Listings (wenn kein Kalender‑Template verwendet wird)
+https://bluray-disc.de/{slug}?page=0
+```
+
+Beispiel (Januar 2025, slug `4k-uhd`):
+
+```powershell
+python -u .\python --year 2025 --calendar-template "https://bluray-disc.de/4k-uhd/kalender?id={year}-{month:02d}" --months 01 --out bluray_2025_01.ics
+```
+
+Tipp: Teste ein Template zuerst mit einem einzigen Monat (`--months 01`) bevor du das ganze Jahr crawlst.
+
 ## Automatisierung / Zeitplanung
 Verwende die mitgelieferte `run_scraper.ps1` oder trage den PowerShell‑Befehl in den Windows Aufgabenplaner ein, wenn das Skript regelmäßig laufen soll.
-
-## Lizenz
-Dieses Repository enthält einfache Hilfsskripte; nutze und modifiziere sie nach Bedarf. Keine Garantie; nutze die Seite respektvoll und beachte die Nutzungsbedingungen von bluray-disc.de.
-
----
-Wenn du möchtest, kann ich die README noch erweitern (Beispielausgabe, Tests, oder ein kurzes HOWTO fürs Deployen als Scheduled Task). Sag kurz, was du ergänzt haben willst.
-BlurayDisc Scraper
-
-This small scraper extracts Blu-ray release items from bluray-disc.de for given month pages and writes an ICS calendar for releases.
 
 Usage
 
