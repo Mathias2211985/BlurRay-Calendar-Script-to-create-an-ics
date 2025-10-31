@@ -1,0 +1,265 @@
+# Benötigte Pakete:
+# pip install requests beautifulsoup4 icalendar
+
+import argparse
+import requests
+from requests.adapters import HTTPAdapter
+from urllib3.util.retry import Retry
+from bs4 import BeautifulSoup
+from icalendar import Calendar, Event
+from datetime import datetime, timezone
+import time
+import re
+from urllib.parse import urljoin
+import logging
+
+BASE = "https://bluray-disc.de"
+
+# Listing pages to crawl (we paginate these). Focus is on year, not specific months.
+MONTH_PAGES = [
+    "https://bluray-disc.de/4k-uhd/neuerscheinungen?page=0",
+    "https://bluray-disc.de/4k-uhd?page=0",
+    "https://bluray-disc.de/4k-uhd/filme?page=0",
+]
+MAX_PAGES = 20
+
+HEADERS = {"User-Agent": "Mozilla/5.0 (compatible; BluRayScraper/1.0)"}
+logging.basicConfig(level=logging.INFO, format='%(asctime)s %(levelname)s: %(message)s')
+
+def create_session():
+    s = requests.Session()
+    retries = Retry(total=3, backoff_factor=0.5, status_forcelist=(500,502,503,504))
+    s.mount('https://', HTTPAdapter(max_retries=retries))
+    s.headers.update(HEADERS)
+    return s
+
+
+def fetch(session, url, timeout=15):
+    logging.debug(f"FETCH -> {url}")
+    r = session.get(url, timeout=timeout)
+    r.raise_for_status()
+    return r.text
+
+def extract_item_links_from_month_page(html):
+    """
+    sucht auf der Monatsseite nach Links zu Film-/Item-Detailseiten.
+    Die Struktur kann sich ändern; daher werden mehrere Selektoren probiert.
+    """
+    soup = BeautifulSoup(html, "html.parser")
+    links = set()
+
+    # Try to find links that point to film detail pages. Accept both
+    # /blu-ray-filme/<id>-... and /blu-ray-news/filme/<id>-... (both occur on the site).
+    for a in soup.select("a"):
+        href = a.get("href", "")
+        if not href:
+            continue
+        full = urljoin(BASE, href.split("?")[0].split('#')[0])
+        # accept film detail pages when they contain a numeric id segment
+        if re.search(r"/blu-ray-filme/\d+", full) or re.search(r"/blu-ray-news/filme/\d+", full):
+            links.add(full)
+    return list(links)
+
+def parse_detail_page(html):
+    """
+    Extrahiert Titel, Release-Datum (wenn vorhanden) und Produktionsjahr (falls angezeigt).
+    Rückgabe: dict mit keys: title, release_date (datetime.date oder None), production_year (int or None)
+    """
+    soup = BeautifulSoup(html, "html.parser")
+    result = {"title": None, "release_date": None, "production_year": None, "url": None}
+
+    # Titel
+    h1 = soup.find(["h1", "h2"])
+    if h1:
+        result["title"] = h1.get_text(strip=True)
+
+    # Suche nach Produktionsjahr - die Seite führt öfters "Produktion: 2025" oder es ist in Klammern im Titel
+    text = soup.get_text(" ", strip=True)
+    # Suche "Produktion" gefolgt von Jahr
+    m = re.search(r"Produktion[:\s]*([0-9]{4})", text)
+    if not m:
+        # Alternativ: (2025) im Titel/Teaser
+        m2 = re.search(r"\(([0-9]{4})\)", text)
+        if m2:
+            result["production_year"] = int(m2.group(1))
+    else:
+        result["production_year"] = int(m.group(1))
+
+    # Release-Datum: suche nach Formaten wie "Ab 07.11.2025" oder "07.11.2025" oder "07. November 2025"
+    # mehrere Muster versuchen:
+    date_patterns = [
+        r"Ab\s+([0-3]?\d\.[01]?\d\.[0-9]{4})",
+        r"ab\s+([0-3]?\d\.[01]?\d\.[0-9]{4})",
+        r"([0-3]?\d\.\s*(?:Januar|Februar|März|April|Mai|Juni|Juli|August|September|Oktober|November|Dezember)\s*[0-9]{4})",
+        r"([0-3]?\d\.[01]?\d\.[0-9]{4})"
+    ]
+    month_dict = {
+        "Januar":"01","Februar":"02","März":"03","April":"04","Mai":"05","Juni":"06",
+        "Juli":"07","August":"08","September":"09","Oktober":"10","November":"11","Dezember":"12"
+    }
+    # prefer searching close to the title (avoid finding page meta publish dates)
+    snippet = text
+    if result["title"]:
+        idx = text.find(result["title"])
+        if idx >= 0:
+            snippet = text[idx:idx+800]
+
+    for pat in date_patterns:
+        mm = re.search(pat, snippet, flags=re.IGNORECASE)
+        if not mm:
+            mm = re.search(pat, text, flags=re.IGNORECASE)
+        if mm:
+            s = mm.group(1)
+            s = s.strip()
+            # replace month names with numeric month
+            for name, num in month_dict.items():
+                if re.search(name, s, flags=re.IGNORECASE):
+                    s = re.sub(name, "."+num+".", s, flags=re.IGNORECASE)
+            # keep only digits, dots and whitespace, then collapse duplicate dots
+            s = re.sub(r"[^0-9\.\s]", "", s)
+            s = re.sub(r"\.{2,}", ".", s)
+            s = s.replace(" ", "")
+            # try several parse attempts
+            for fmt in ("%d.%m.%Y", "%d.%m.%y"):
+                try:
+                    dt = datetime.strptime(s, fmt)
+                    result["release_date"] = dt.date()
+                    result["raw_date"] = s
+                    break
+                except Exception:
+                    pass
+
+            # if we only found day.month (no year), try to infer year 2025 when sensible
+            if result.get("release_date") is None:
+                m_short = re.search(r"([0-3]?\d\.[01]?\d)\.?$", s)
+                if m_short:
+                    daymonth = m_short.group(1)
+                    # infer year 2025 if month is 11 or 12
+                    try:
+                        dm = datetime.strptime(daymonth + ".2025", "%d.%m.%Y")
+                        result["release_date"] = dm.date()
+                        result["raw_date"] = daymonth + ".2025"
+                    except Exception:
+                        pass
+
+            # fallback: if no date yet, try to find day.month + year within nearby text
+            if result.get("release_date") is None:
+                m2 = re.search(r"([0-3]?\d\.[01]?\d)\D{0,30}([0-9]{4})", snippet)
+                if not m2:
+                    m2 = re.search(r"([0-3]?\d\.[01]?\d)\D{0,30}([0-9]{4})", text)
+                if m2:
+                    candidate = f"{m2.group(1)}.{m2.group(2)}"
+                    candidate = re.sub(r"\.{2,}", ".", candidate)
+                    try:
+                        dt = datetime.strptime(candidate, "%d.%m.%Y")
+                        result["release_date"] = dt.date()
+                        result["raw_date"] = candidate
+                    except Exception:
+                        pass
+            if result.get("release_date"):
+                break
+
+    return result
+
+def main():
+    cal = Calendar()
+    cal.add('prodid', '-//BlurayDisc Scraper//de//')
+    cal.add('version', '2.0')
+
+    found = []
+    visited = set()
+
+    parser = argparse.ArgumentParser(description='BlurayDisc scraper')
+    parser.add_argument('--year', type=int, default=2025, help='Produktion year to filter (default 2025)')
+    parser.add_argument('--out', type=str, default='bluray_YYYY_year.ics', help='Output ICS filename pattern')
+    parser.add_argument('--calendar-template', type=str, default=None, help='Optional URL template for calendar pages, e.g. "https://bluray-disc.de/4k-uhd/kalender?id={year}-{month:02d}"')
+    parser.add_argument('--months', type=str, default=None, help='Comma-separated months or range (e.g. "01,02" or "01-03"). If omitted and --calendar-template given, defaults to all 12 months.')
+    args = parser.parse_args()
+
+    target_year = args.year
+    session = create_session()
+
+    # Build pages list: if user provided a calendar-template, expand months from that template
+    if args.calendar_template:
+        # parse months
+        def parse_months(s):
+            if not s:
+                return list(range(1,13))
+            parts = s.split(',')
+            months = []
+            for p in parts:
+                p = p.strip()
+                if '-' in p:
+                    a,b = p.split('-',1)
+                    months.extend(range(int(a), int(b)+1))
+                else:
+                    months.append(int(p))
+            return sorted(set(months))
+
+        month_nums = parse_months(args.months)
+        pages = [args.calendar_template.format(year=target_year, month=m) for m in month_nums]
+    else:
+        pages = MONTH_PAGES
+
+    for month_url in pages:
+        page = 0
+        while True:
+            url = re.sub(r'page=\d+', f'page={page}', month_url)
+            logging.info(f'Loading month page: {url}')
+            try:
+                html = fetch(session, url)
+            except Exception as e:
+                logging.warning(f'Fehler beim Laden {url}: {e}')
+                break
+            links = extract_item_links_from_month_page(html)
+            if not links:
+                break
+            logging.info(f"{len(links)} mögliche Detail-Links gefunden auf {url}")
+            new_links = 0
+            for link in links:
+                if link in visited:
+                    continue
+                visited.add(link)
+                new_links += 1
+                time.sleep(0.5)
+                try:
+                    d_html = fetch(session, link)
+                except Exception as e:
+                    logging.warning(f"Fehler beim Laden Detailseite {link}: {e}")
+                    continue
+                meta = parse_detail_page(d_html)
+                meta["url"] = link
+                title = meta.get("title") or link
+                py = meta.get("production_year")
+                rdate = meta.get("release_date")
+
+                # require explicit production year match; include all months if production year matches
+                if py == target_year:
+                    found.append((title, rdate, link))
+                    if rdate:
+                        ev = Event()
+                        ev.add('summary', title)
+                        ev.add('dtstamp', datetime.now(timezone.utc))
+                        ev.add('dtstart', rdate)
+                        ev.add('description', f"Quelle: {link}")
+                        ev['uid'] = f"{abs(hash(link))}@bluray-disc.de"
+                        cal.add_component(ev)
+                        logging.info(f'Added event: {title} -> {rdate}')
+                    else:
+                        logging.info(f'Added (no date) production {target_year}: {title} ({link})')
+                else:
+                    logging.debug(f'Skipping (production {py}) {title}')
+
+            if new_links == 0 or page >= MAX_PAGES:
+                break
+            page += 1
+
+    outname = args.out.replace('YYYY', str(target_year)).replace('MM', 'year')
+    with open(outname, 'wb') as f:
+        f.write(cal.to_ical())
+    logging.info(f'Fertig. {len(found)} Einträge gefunden. ICS erzeugt: {outname}')
+    for t, d, l in found:
+        print('-', t, '|', d, '|', l)
+
+if __name__ == "__main__":
+    main()
