@@ -43,8 +43,15 @@ try {
     if ($PSBoundParameters.ContainsKey('IgnoreProduction')) {
         # passed on command line; keep as-is
     } else {
-        $resp2 = Read-Host "Ignoriere Produktionsjahr-Prüfung? (j/N)"
-        if ($resp2 -and $resp2.Trim().ToLower().StartsWith('j')) { $IgnoreProduction = $true } else { $IgnoreProduction = $false }
+        # default to Yes when the user just presses Enter (J/n)
+        $resp2 = Read-Host "Ignoriere Produktionsjahr-Prüfung? (J/n)"
+        if ([string]::IsNullOrWhiteSpace($resp2)) {
+            $IgnoreProduction = $true
+        } elseif ($resp2.Trim().ToLower().StartsWith('j')) {
+            $IgnoreProduction = $true
+        } else {
+            $IgnoreProduction = $false
+        }
     }
     # Support multiple templates (comma-separated). Convert known slugs to full calendar URLs.
     $templateList = ($CalendarTemplate -split ',') | ForEach-Object { $_.Trim() } | Where-Object { -not [string]::IsNullOrWhiteSpace($_) }

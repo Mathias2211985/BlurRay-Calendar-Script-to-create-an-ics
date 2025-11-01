@@ -61,13 +61,41 @@ CLI‑Optionen (Kurzüberblick)
 
 Interactive Release‑Jahre (Runner behaviour)
 
-- Das Runner‑Script `run_scraper.ps1` fragt jetzt (nur wenn `-ReleaseYears` nicht übergeben wurde) interaktiv nach den gewünschten Release‑Jahren. Dieser Prompt erscheint bewusst VOR dem Erfragen des `OutPattern`, damit gewählte Release‑Jahre direkt in den Dateinamen eingebettet werden können.
-- Leere Eingabe bedeutet „ALL“ (keine Einschränkung).
-- Mehrere Jahre können kommasepariert eingegeben werden, z. B. `2024,2025`.
-- Wenn du `-ReleaseYears` beim Aufruf von `run_scraper.ps1` mitgibst, wird dieser Wert unverändert an das Python‑Skript weitergereicht (`--release-years`) und du wirst nicht erneut gefragt.
-- Zusätzlich fragt der Runner (falls du `-IgnoreProduction` nicht als Param übergibst) interaktiv, ob die Produktionsjahr‑Prüfung ignoriert werden soll. Frage und mögliche Antworten:
-  - Prompt: "Ignoriere Produktionsjahr-Prüfung? (j/N)" — Eingabe `j` (oder `J`) schaltet `--ignore-production` ein und der Runner übergibt dieses Flag an das Python‑Script.
-  - Leere Eingabe oder `n` bedeutet: Produktionsprüfung bleibt aktiv (Standard).
+ 
+ Beispiel — Aufruf mit Ignorieren der Produktionsprüfung
+ 
+ ```powershell
+ Set-Location -LiteralPath 'C:\Test\autostart'
+ # interaktiv gefragt wird: Ignoriere Produktionsjahr-Prüfung? (J/n)  -> Enter (Default = J)
+ .\run_scraper.ps1 -Years '2025' -Months '11' -CalendarTemplate 'blu-ray-filme' -OutPattern 'bluray_{year}_{months}.ics' -ReleaseYears '2025'
+ ```
+ 
+ Oder non‑interactive direkt mit dem Switch:
+ 
+ ```powershell
+ powershell -NoProfile -ExecutionPolicy Bypass -File .\run_scraper.ps1 -Years '2025' -Months '11' -CalendarTemplate 'blu-ray-filme' -OutPattern 'bluray_{year}_{months}.ics' -ReleaseYears '2025' -IgnoreProduction
+ ```
+ 
+ Erwartete (gekürzte) Ausgabe in der erzeugten ICS (Beispiel‑EVENTs):
+ 
+ ```
+ BEGIN:VCALENDAR
+ VERSION:2.0
+ PRODID:-//BlurayDisc Scraper//de//
+ BEGIN:VEVENT
+ SUMMARY:Safe House - Verrat ist die ultimative Waffe Blu-ray
+ DTSTART;VALUE=DATE:20251107
+ DESCRIPTION:Quelle: https://bluray-disc.de/blu-ray-filme/200717-safe_house_verrat_ist_die_ultimative_waffe
+ END:VEVENT
+ BEGIN:VEVENT
+ SUMMARY:James Bond 007 - Feuerball 4K (4K UHD + Blu-ray) Blu-ray
+ DTSTART;VALUE=DATE:20251106
+ DESCRIPTION:Quelle: https://bluray-disc.de/blu-ray-filme/200419-james_bond_007_feuerball_4k_4k_uhd_bluray
+ END:VEVENT
+ END:VCALENDAR
+ ```
+ 
+ Hinweis: Die tatsächlichen Events hängen von den Seiteninhalten ab; mit `-IgnoreProduction` werden Einträge mit passendem Veröffentlichungsjahr aufgenommen, auch wenn kein explizites "Produktion:"-Feld vorhanden ist.
 - Wenn du das Python‑Skript direkt ausführst, fragt es ebenfalls interaktiv (nur wenn stdin ein TTY ist) nach `--release-years`, falls das Argument nicht bereits gesetzt wurde.
 
 Beispiele:
