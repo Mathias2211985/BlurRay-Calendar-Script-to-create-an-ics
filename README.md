@@ -45,7 +45,9 @@ CLI‑Optionen (Kurzüberblick)
 - `--year YEAR` — Produktionsjahr, nach dem explizit gesucht wird (default: 2025)
 - `--calendar-template URL` — Template für Monats‑Kalenderseiten; Platzhalter `{year}` und `{month:02d}` möglich
 - `--months M1,M2,...` — Komma‑separierte Monatsnummern (z. B. `01,02,03`). Wenn weggelassen, werden die Standard‑Listing‑Seiten gecrawlt.
-- `--out PATH` — Ziel‑ICS Datei
+- `--out PATH` — Ziel‑ICS Datei. Unterstützt zusätzlich das Platzhalter `{slug}`.
+  - Wenn `{slug}` im Muster vorkommt, wird es durch einen sicheren Template‑Slug ersetzt (z. B. `4k-uhd`).
+  - Wenn `{slug}` nicht verwendet wird, fügt `run_scraper.ps1` beim Aufruf automatisch `_{slug}` vor der Dateiendung ein, um Überschreibungen zu vermeiden (z. B. `bluray_2025_01_4k-uhd.ics`).
 - `--max-pages N` — Max. Seiten pro Listing (Schutz gegen Endlosschleifen)
 
 Beispiele:

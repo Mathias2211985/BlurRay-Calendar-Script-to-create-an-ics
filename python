@@ -168,6 +168,8 @@ def main():
 
     found = []
     visited = set()
+    # candidates: normalized_title -> candidate dict {title, release_date, url}
+    candidates = {}
 
     parser = argparse.ArgumentParser(description='BlurayDisc scraper')
     parser.add_argument('--year', type=int, default=2025, help='Produktion year to filter (default 2025)')
@@ -197,7 +199,18 @@ def main():
             return sorted(set(months))
 
         month_nums = parse_months(args.months)
-        pages = [args.calendar_template.format(year=target_year, month=m) for m in month_nums]
+
+        # If the provided calendar_template looks like a full URL (starts with http or contains ://)
+        # we'll use it directly. Otherwise we treat it as a small segment (e.g. "{year}-{month:02d}")
+        # and embed it into the canonical calendar path.
+        def make_page(m):
+            seg = args.calendar_template.format(year=target_year, month=m)
+            if seg.lower().startswith('http') or '://' in seg:
+                return seg
+            # embed as id value into the canonical calendar path by default
+            return f"https://bluray-disc.de/calendar_template/kalender?id={seg}"
+
+        pages = [make_page(m) for m in month_nums]
     else:
         pages = MONTH_PAGES
 
@@ -236,17 +249,94 @@ def main():
                 # require explicit production year match; include all months if production year matches
                 if py == target_year:
                     found.append((title, rdate, link))
-                    if rdate:
-                        ev = Event()
-                        ev.add('summary', title)
-                        ev.add('dtstamp', datetime.now(timezone.utc))
-                        ev.add('dtstart', rdate)
-                        ev.add('description', f"Quelle: {link}")
-                        ev['uid'] = f"{abs(hash(link))}@bluray-disc.de"
-                        cal.add_component(ev)
-                        logging.info(f'Added event: {title} -> {rdate}')
+                    # Deduplicate similar titles: collect candidates by normalized base title
+                    def normalize_title(t: str) -> str:
+                        """Stronger normalization for dedup: strip parentheticals, edition tokens, covers,
+                        and common format words like 4K/UHD/Blu-ray/Steelbook/Mediabook, then sanitize.
+                        """
+                        if not t:
+                            return ""
+                        s = t.lower()
+                        # normalize German umlauts to ascii-ish equivalents
+                        s = s.replace('ä', 'ae').replace('ö', 'oe').replace('ü', 'ue').replace('ß', 'ss')
+
+                        # remove parenthetical and bracketed parts (e.g. (Cover A), (4K UHD + Blu-ray))
+                        s = re.sub(r"\([^)]*\)", ' ', s)
+                        s = re.sub(r"\[[^]]*\]", ' ', s)
+
+                        # remove known edition/format tokens
+                        tokens = [
+                            'limited', 'steelbook', 'mediabook', 'wattierte', 'amaray', 'cover', 'edition',
+                            '4k', 'uhd', 'blu-ray', 'blu ray', 'soundtrack', 'cd', '2 blu-ray', '2 bluray', '\\+',
+                            'deluxe', 'collector', 'exclusive', 'special', 'mediabook', 'mediabook edition'
+                        ]
+                        for tok in tokens:
+                            # escape token for regex when needed; use real word-boundary \b
+                            pat = r'\b' + re.escape(tok) + r'\b'
+                            s = re.sub(pat, ' ', s)
+
+                        # remove numeric-k tokens like '4k', '8k'
+                        s = re.sub(r'\b\d+k\b', ' ', s)
+                        # normalize common blu-ray variants
+                        s = re.sub(r'\bblu[\s-]?ray\b', ' ', s)
+
+                        # remove any remaining non-alphanumeric (allow - and space)
+                        s = re.sub(r'[^a-z0-9\-\s]', ' ', s)
+                        # collapse whitespace and dashes
+                        s = re.sub(r'[-\s]+', ' ', s)
+                        s = s.strip()
+                        return s
+
+                    key = normalize_title(title)
+                    # candidate selection: prefer entries with release_date; if both have dates keep earliest; else prefer longer title
+                    existing = candidates.get(key)
+                    if existing is None:
+                        candidates[key] = { 'title': title, 'release_date': rdate, 'url': link }
+                        logging.info(f'Candidate added for key "{key}": {title} -> {rdate}')
                     else:
-                        logging.info(f'Added (no date) production {target_year}: {title} ({link})')
+                        ex_date = existing.get('release_date')
+                        # prefer the one with a date
+                        if ex_date and not rdate:
+                            logging.debug(f'Keep existing candidate (has date) for "{key}": {existing["title"]}')
+                        elif rdate and not ex_date:
+                            candidates[key] = { 'title': title, 'release_date': rdate, 'url': link }
+                            logging.info(f'Replaced candidate for "{key}" with dated entry: {title} -> {rdate}')
+                        elif rdate and ex_date:
+                            # both have dates: keep earliest
+                            try:
+                                if rdate < ex_date:
+                                    candidates[key] = { 'title': title, 'release_date': rdate, 'url': link }
+                                    logging.info(f'Replaced candidate for "{key}" with earlier date: {title} -> {rdate}')
+                                elif rdate > ex_date:
+                                    logging.debug(f'Existing candidate for "{key}" has earlier date: {existing["title"]} -> {ex_date}')
+                                else:
+                                    # same date: prefer the non-special/standard edition when possible
+                                    edition_tokens = ['steelbook', 'mediabook', 'limited', 'wattierte', 'amaray', 'collector']
+                                    new_has = any(tok in (title or '').lower() for tok in edition_tokens)
+                                    ex_has = any(tok in (existing.get('title') or '').lower() for tok in edition_tokens)
+                                    if ex_has and not new_has:
+                                        # existing is special, new is standard -> prefer new (standard)
+                                        candidates[key] = { 'title': title, 'release_date': rdate, 'url': link }
+                                        logging.info(f'Replaced special candidate for "{key}" with standard: {title} -> {rdate}')
+                                    elif new_has and not ex_has:
+                                        # new is special while existing is standard -> keep existing (prefer standard)
+                                        logging.info(f'Keeping existing standard candidate for "{key}": {existing["title"]}')
+                                    else:
+                                        # fallback: keep the shorter title (prefer concise)
+                                        if len(title) < len(existing.get('title','')):
+                                            candidates[key] = { 'title': title, 'release_date': rdate, 'url': link }
+                                            logging.info(f'Replaced candidate for "{key}" with shorter title: {title}')
+                                        else:
+                                            logging.debug(f'Keep existing candidate for "{key}": {existing["title"]}')
+                            except Exception:
+                                logging.debug(f'Could not compare dates for key "{key}"')
+                        else:
+                            # neither have dates: prefer longer (more descriptive) title
+                            if len(title) > len(existing.get('title','')):
+                                candidates[key] = { 'title': title, 'release_date': rdate, 'url': link }
+                                logging.info(f'Replaced undated candidate for "{key}" with longer title: {title}')
+                            else:
+                                logging.debug(f'Keep existing undated candidate for "{key}": {existing["title"]}')
                 else:
                     logging.debug(f'Skipping (production {py}) {title}')
 
@@ -255,11 +345,35 @@ def main():
             page += 1
 
     outname = args.out.replace('YYYY', str(target_year)).replace('MM', 'year')
+    # After crawling, build calendar events from chosen candidates (deduplicated)
+    for key, cand in candidates.items():
+        title = cand.get('title')
+        rdate = cand.get('release_date')
+        link = cand.get('url')
+        if rdate:
+            ev = Event()
+            ev.add('summary', title)
+            ev.add('dtstamp', datetime.now(timezone.utc))
+            ev.add('dtstart', rdate)
+            ev.add('description', f"Quelle: {link}")
+            ev['uid'] = f"{abs(hash(link))}@bluray-disc.de"
+            cal.add_component(ev)
+            logging.info(f'Added event: {title} -> {rdate}')
+        else:
+            # still include undated productions as informational entries (no DTSTART)
+            ev = Event()
+            ev.add('summary', title)
+            ev.add('dtstamp', datetime.now(timezone.utc))
+            ev.add('description', f"Quelle: {link}")
+            ev['uid'] = f"{abs(hash(link))}@bluray-disc.de"
+            cal.add_component(ev)
+            logging.info(f'Added (no date) production {target_year}: {title} ({link})')
+
     with open(outname, 'wb') as f:
         f.write(cal.to_ical())
-    logging.info(f'Fertig. {len(found)} Einträge gefunden. ICS erzeugt: {outname}')
-    for t, d, l in found:
-        print('-', t, '|', d, '|', l)
+    logging.info(f'Fertig. {len(candidates)} Einträge (dedupliziert) gefunden. ICS erzeugt: {outname}')
+    for key, cand in candidates.items():
+        print('-', cand.get('title'), '|', cand.get('release_date'), '|', cand.get('url'))
 
 if __name__ == "__main__":
     main()
