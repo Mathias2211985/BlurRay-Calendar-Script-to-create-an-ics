@@ -45,10 +45,51 @@ CLI‑Optionen (Kurzüberblick)
 - `--year YEAR` — Produktionsjahr, nach dem explizit gesucht wird (default: 2025)
 - `--calendar-template URL` — Template für Monats‑Kalenderseiten; Platzhalter `{year}` und `{month:02d}` möglich
 - `--months M1,M2,...` — Komma‑separierte Monatsnummern (z. B. `01,02,03`). Wenn weggelassen, werden die Standard‑Listing‑Seiten gecrawlt.
-- `--out PATH` — Ziel‑ICS Datei. Unterstützt zusätzlich das Platzhalter `{slug}`.
+- `--out PATH` — Ziel‑ICS Datei. Unterstützt zusätzlich die Platzhalter `{slug}` und `{release_years}`.
   - Wenn `{slug}` im Muster vorkommt, wird es durch einen sicheren Template‑Slug ersetzt (z. B. `4k-uhd`).
-  - Wenn `{slug}` nicht verwendet wird, fügt `run_scraper.ps1` beim Aufruf automatisch `_{slug}` vor der Dateiendung ein, um Überschreibungen zu vermeiden (z. B. `bluray_2025_01_4k-uhd.ics`).
+  - Wenn `{release_years}` im Muster vorkommt, wird es durch die (sanierten) Release‑Jahreswerte ersetzt (z. B. `2025-2026`).
+  - Wenn eines der Tokens nicht vorhanden ist, fügt `run_scraper.ps1` fehlende Teile automatisch vor der Dateiendung ein, um Überschreibungen zu vermeiden (z. B. `bluray_2025_12_2025-2026_4k-uhd.ics`).
+- `--release-years YEARS` — Optional: Komma‑separierte RELEASE‑Jahre (bezogen auf das Veröffentlichungsdatum/`DTSTART`), z. B. `--release-years "2024,2025"`.
+  - Wenn gesetzt, werden nur Events berücksichtigt, deren `DTSTART` in einem dieser Jahre liegt.
+  - Wenn du `run_scraper.ps1` interaktiv startest und `-ReleaseYears` nicht übergeben hast, fragt der Runner VOR dem Erstellen des Dateinamens nach den Release‑Jahren, damit die Auswahl in den Dateinamen eingebettet werden kann.
+- `--ignore-production` — Optional: Wenn gesetzt, wird die Produktionsjahr‑Prüfung deaktiviert. Nützlich, wenn du ausschließlich nach dem Veröffentlichungsjahr (DTSTART) filtern möchtest und Seiten ohne ein explizites "Produktion:"-Feld trotzdem berücksichtigen willst.
+  - Runner‑Param: `-IgnoreProduction` (weitergereicht als `--ignore-production` an Python).
+- `--only-production` — Wenn gesetzt, gilt die traditionelle Filterung: es werden nur Einträge aufgenommen, deren Detailseite ausdrücklich `Produktion: <YEAR>` enthält (nutzt `--year`, Standard 2025). Wenn du dieses Flag nicht setzt, ist das Standardverhalten: alle gefundenen Detailseiten werden berücksichtigt (du kannst zusätzlich `--release-years` verwenden, um die Results nach Veröffentlichungsjahr einzuschränken).
 - `--max-pages N` — Max. Seiten pro Listing (Schutz gegen Endlosschleifen)
+
+## Interaktives Abfragen der Release‑Jahre
+
+Interactive Release‑Jahre (Runner behaviour)
+
+- Das Runner‑Script `run_scraper.ps1` fragt jetzt (nur wenn `-ReleaseYears` nicht übergeben wurde) interaktiv nach den gewünschten Release‑Jahren. Dieser Prompt erscheint bewusst VOR dem Erfragen des `OutPattern`, damit gewählte Release‑Jahre direkt in den Dateinamen eingebettet werden können.
+- Leere Eingabe bedeutet „ALL“ (keine Einschränkung).
+- Mehrere Jahre können kommasepariert eingegeben werden, z. B. `2024,2025`.
+- Wenn du `-ReleaseYears` beim Aufruf von `run_scraper.ps1` mitgibst, wird dieser Wert unverändert an das Python‑Skript weitergereicht (`--release-years`) und du wirst nicht erneut gefragt.
+- Zusätzlich fragt der Runner (falls du `-IgnoreProduction` nicht als Param übergibst) interaktiv, ob die Produktionsjahr‑Prüfung ignoriert werden soll. Frage und mögliche Antworten:
+  - Prompt: "Ignoriere Produktionsjahr-Prüfung? (j/N)" — Eingabe `j` (oder `J`) schaltet `--ignore-production` ein und der Runner übergibt dieses Flag an das Python‑Script.
+  - Leere Eingabe oder `n` bedeutet: Produktionsprüfung bleibt aktiv (Standard).
+- Wenn du das Python‑Skript direkt ausführst, fragt es ebenfalls interaktiv (nur wenn stdin ein TTY ist) nach `--release-years`, falls das Argument nicht bereits gesetzt wurde.
+
+Beispiele:
+
+Interaktiv (Runner fragt nach Jahren, Prompt erscheint vor dem Dateinamen‑Prompt):
+
+```powershell
+Set-Location -LiteralPath 'C:\Test\autostart'
+.\run_scraper.ps1
+# Oder per Doppelklick die mitgelieferte run_scraper_doubleclick.bat
+```
+
+Non‑interactive (Parameter übergeben):
+
+```powershell
+powershell -NoProfile -ExecutionPolicy Bypass -File .\run_scraper.ps1 -Years '2025' -Months '12' -CalendarTemplate '4k-uhd' -OutPattern 'bluray_{year}_{months}.ics' -ReleaseYears '2025'
+
+# Oder Python direkt:
+python -u .\python --release-years "2024,2025" --calendar-template "https://bluray-disc.de/4k-uhd/kalender?id={year}-{month:02d}" --months 12 --out bluray_2024-2025_12.ics
+```
+
+Hinweis: Standard ist „ALL“ — du musst nichts eingeben, wenn du alle gefundenen Einträge behalten willst.
 
 Beispiele:
 

@@ -76,14 +76,24 @@ def parse_detail_page(html):
     # Suche nach Produktionsjahr - die Seite führt öfters "Produktion: 2025" oder es ist in Klammern im Titel
     text = soup.get_text(" ", strip=True)
     # Suche "Produktion" gefolgt von Jahr
-    m = re.search(r"Produktion[:\s]*([0-9]{4})", text)
-    if not m:
-        # Alternativ: (2025) im Titel/Teaser
-        m2 = re.search(r"\(([0-9]{4})\)", text)
-        if m2:
-            result["production_year"] = int(m2.group(1))
-    else:
-        result["production_year"] = int(m.group(1))
+    # Try to find an explicit "Produktion" label and extract the first 4-digit year
+    # that appears shortly after it. This covers variants like:
+    #   Produktion: USA / 1990
+    #   Produktion: Neuseeland / 2025
+    #   Produktion\nUSA / 1990
+    m = re.search(r"Produktion\b", text, flags=re.IGNORECASE)
+    if m:
+        # look at the next N characters after the label for a 4-digit year
+        start = m.end()
+        snippet = text[start:start+200]
+        y = re.search(r"([0-9]{4})", snippet)
+        if y:
+            try:
+                result["production_year"] = int(y.group(1))
+            except Exception:
+                pass
+    # NOTE: do NOT infer production year from a bare parenthetical like (2025) elsewhere on the page
+    # Many listings use parentheses for release/edition years which are not the production year.
 
     # Release-Datum: suche nach Formaten wie "Ab 07.11.2025" oder "07.11.2025" oder "07. November 2025"
     # mehrere Muster versuchen:
@@ -173,10 +183,27 @@ def main():
 
     parser = argparse.ArgumentParser(description='BlurayDisc scraper')
     parser.add_argument('--year', type=int, default=2025, help='Produktion year to filter (default 2025)')
+    parser.add_argument('--release-years', type=str, default=None, help='Optional: comma-separated RELEASE years to require (based on parsed DTSTART year), e.g. "2024,2025"')
+    parser.add_argument('--only-production', action='store_true', default=False, help='If set, require the production year match (--year). By default all found items are included unless --release-years is used or --only-production is set.')
+    parser.add_argument('--ignore-production', action='store_true', default=False, help='If set, ignore production-year checks even if --year is provided (useful when you only want to filter by --release-years).')
     parser.add_argument('--out', type=str, default='bluray_YYYY_year.ics', help='Output ICS filename pattern')
     parser.add_argument('--calendar-template', type=str, default=None, help='Optional URL template for calendar pages, e.g. "https://bluray-disc.de/4k-uhd/kalender?id={year}-{month:02d}"')
     parser.add_argument('--months', type=str, default=None, help='Comma-separated months or range (e.g. "01,02" or "01-03"). If omitted and --calendar-template given, defaults to all 12 months.')
     args = parser.parse_args()
+
+    # Interactive prompt for release-years when not provided and running interactively
+    # Default behavior: all years (None). If user types comma-separated years, we keep that string.
+    try:
+        import sys
+        if args.release_years is None and sys.stdin.isatty():
+            resp = input('Release-Jahr(e) eingeben (komma-getrennt), oder leer für alle [Enter]: ').strip()
+            if resp == '':
+                args.release_years = None
+            else:
+                args.release_years = resp
+    except Exception:
+        # if anything goes wrong (non-interactive environment), keep args as-is
+        pass
 
     target_year = args.year
     session = create_session()
@@ -246,8 +273,43 @@ def main():
                 py = meta.get("production_year")
                 rdate = meta.get("release_date")
 
-                # require explicit production year match; include all months if production year matches
-                if py == target_year:
+                # determine whether to include this candidate based on filters:
+                include_candidate = False
+                # parse release-years argument into list if provided
+                release_years = None
+                if args.release_years:
+                    try:
+                        release_years = [int(x.strip()) for x in args.release_years.split(',') if x.strip()]
+                    except Exception:
+                        release_years = None
+
+                # Determine if the user explicitly passed --year on the command line (avoid treating default as intent)
+                import sys as _sys
+                has_year_arg = any(a.startswith('--year') for a in _sys.argv[1:])
+
+                # Active production filter: user explicitly supplied --year OR used --only-production,
+                # unless ignore-production was requested.
+                if getattr(args, 'ignore_production', False):
+                    prod_filter_active = False
+                else:
+                    prod_filter_active = has_year_arg or args.only_production
+
+                # Evaluate individual filter predicates (they are ANDed)
+                #  - release predicate: if --release-years provided, require rdate year in that list; otherwise pass
+                if release_years is None:
+                    pass_release = True
+                else:
+                    pass_release = bool(rdate and getattr(rdate, 'year', None) in release_years)
+
+                #  - production predicate: if production filter active, require production_year == target_year; otherwise pass
+                if not prod_filter_active:
+                    pass_production = True
+                else:
+                    pass_production = (py is not None and py == target_year)
+
+                include_candidate = bool(pass_release and pass_production)
+
+                if include_candidate:
                     found.append((title, rdate, link))
                     # Deduplicate similar titles: collect candidates by normalized base title
                     def normalize_title(t: str) -> str:
@@ -292,7 +354,7 @@ def main():
                     existing = candidates.get(key)
                     if existing is None:
                         candidates[key] = { 'title': title, 'release_date': rdate, 'url': link }
-                        logging.info(f'Candidate added for key "{key}": {title} -> {rdate}')
+                        logging.info(f'Candidate added for key "{key}": {title} -> {rdate} (prod={py})')
                     else:
                         ex_date = existing.get('release_date')
                         # prefer the one with a date
@@ -300,7 +362,7 @@ def main():
                             logging.debug(f'Keep existing candidate (has date) for "{key}": {existing["title"]}')
                         elif rdate and not ex_date:
                             candidates[key] = { 'title': title, 'release_date': rdate, 'url': link }
-                            logging.info(f'Replaced candidate for "{key}" with dated entry: {title} -> {rdate}')
+                            logging.info(f'Replaced candidate for "{key}" with dated entry: {title} -> {rdate} (prod={py})')
                         elif rdate and ex_date:
                             # both have dates: keep earliest
                             try:
@@ -317,7 +379,7 @@ def main():
                                     if ex_has and not new_has:
                                         # existing is special, new is standard -> prefer new (standard)
                                         candidates[key] = { 'title': title, 'release_date': rdate, 'url': link }
-                                        logging.info(f'Replaced special candidate for "{key}" with standard: {title} -> {rdate}')
+                                        logging.info(f'Replaced special candidate for "{key}" with standard: {title} -> {rdate} (prod={py})')
                                     elif new_has and not ex_has:
                                         # new is special while existing is standard -> keep existing (prefer standard)
                                         logging.info(f'Keeping existing standard candidate for "{key}": {existing["title"]}')
@@ -325,7 +387,7 @@ def main():
                                         # fallback: keep the shorter title (prefer concise)
                                         if len(title) < len(existing.get('title','')):
                                             candidates[key] = { 'title': title, 'release_date': rdate, 'url': link }
-                                            logging.info(f'Replaced candidate for "{key}" with shorter title: {title}')
+                                            logging.info(f'Replaced candidate for "{key}" with shorter title: {title} (prod={py})')
                                         else:
                                             logging.debug(f'Keep existing candidate for "{key}": {existing["title"]}')
                             except Exception:
@@ -338,7 +400,11 @@ def main():
                             else:
                                 logging.debug(f'Keep existing undated candidate for "{key}": {existing["title"]}')
                 else:
-                    logging.debug(f'Skipping (production {py}) {title}')
+                    # Log why this candidate was skipped (release / production predicates)
+                    try:
+                        logging.info(f'Skipping: {title} | release_ok={pass_release} production_ok={pass_production} prod={py} rdate={rdate}')
+                    except Exception:
+                        logging.info(f'Skipping: {title} | prod={py} rdate={rdate}')
 
             if new_links == 0 or page >= MAX_PAGES:
                 break

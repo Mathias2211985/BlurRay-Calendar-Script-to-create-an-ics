@@ -8,7 +8,9 @@ param(
     [string]$Years,
     [string]$Months,
     [string]$OutPattern,
-    [string]$CalendarTemplate
+    [string]$CalendarTemplate,
+    [string]$ReleaseYears,
+    [switch]$IgnoreProduction
 )
 
 Set-StrictMode -Version Latest
@@ -29,10 +31,25 @@ try {
             $CalendarTemplate = '4k-uhd'
         }
     }
+    # Determine ReleaseYears: if provided as parameter, keep; otherwise prompt the user BEFORE building filenames
+    if ($PSBoundParameters.ContainsKey('ReleaseYears') -and -not [string]::IsNullOrWhiteSpace($ReleaseYears)) {
+        # parameter provided by caller; keep as-is
+    } else {
+        # Prompt now so the chosen release-years can be embedded into the output filename
+        $resp = Read-Host "Gib Release-Jahr(e) ein (Komma-getrennt, z.B. 2025 oder 2024,2025). Leer = ALL"
+        if ([string]::IsNullOrWhiteSpace($resp)) { $ReleaseYears = $null } else { $ReleaseYears = $resp }
+    }
+    # Determine IgnoreProduction: if provided as parameter, keep; otherwise ask the user interactively
+    if ($PSBoundParameters.ContainsKey('IgnoreProduction')) {
+        # passed on command line; keep as-is
+    } else {
+        $resp2 = Read-Host "Ignoriere Produktionsjahr-Prüfung? (j/N)"
+        if ($resp2 -and $resp2.Trim().ToLower().StartsWith('j')) { $IgnoreProduction = $true } else { $IgnoreProduction = $false }
+    }
     # Support multiple templates (comma-separated). Convert known slugs to full calendar URLs.
     $templateList = ($CalendarTemplate -split ',') | ForEach-Object { $_.Trim() } | Where-Object { -not [string]::IsNullOrWhiteSpace($_) }
     if (-not $OutPattern) {
-        $OutPattern = Read-Host "Ausgabe Dateiname Muster (verwende {year} und {months}), z.B. bluray_{year}_{months}.ics [Enter=default]"
+        $OutPattern = Read-Host "Ausgabe Dateiname Muster (verwende {year}, {months} und optional {release_years} und {slug}), z.B. bluray_{year}_{months}_{release_years}.ics [Enter=default]"
         if ([string]::IsNullOrWhiteSpace($OutPattern)) { $OutPattern = 'bluray_{year}_{months}.ics' }
     }
 
@@ -42,6 +59,9 @@ try {
 
     Write-Output "Running scraper for years: $($yearList -join ', ')";
     if ($monthsArg) { Write-Output "Months: $monthsArg" } else { Write-Output "Using default listings (no --months)" }
+    # show which release-years will be used (or ALL)
+    if ([string]::IsNullOrWhiteSpace($ReleaseYears)) { Write-Output "Release-years: ALL" } else { Write-Output "Release-years: $ReleaseYears" }
+    Write-Output "Ignore-production: $([bool]$IgnoreProduction)"
 
     $results = @()
     foreach ($y in $yearList) {
@@ -73,24 +93,53 @@ try {
                 $slug = $slugRaw.ToLower() -replace '[^a-z0-9\-_.]', '-' -replace '-{2,}', '-' -replace '(^-+|-+$)',''
                 if ([string]::IsNullOrWhiteSpace($slug)) { $slug = 'tpl' }
 
-                # Build the output filename. If user provided {slug} in OutPattern, replace it.
-                # Otherwise append _{slug} before the extension to avoid overwrites across templates.
+                # Build the output filename. Support {release_years} token; otherwise we'll ensure the release-years are appended.
                 $outName = $OutPattern -replace '\{year\}',$y
                 $outName = $outName -replace '\{months\}',$monthsToken
+
+                # prepare a sanitized release-years slug (e.g. '2024-2025' or 'ALL')
+                if ([string]::IsNullOrWhiteSpace($ReleaseYears)) {
+                    $releaseSlug = 'ALL'
+                } else {
+                    $releaseSlug = ($ReleaseYears -split '\s*,\s*' | Where-Object { -not [string]::IsNullOrWhiteSpace($_) }) -join '-'
+                }
+
+                # if pattern contains {release_years}, replace it now
+                $releaseIncluded = $false
+                if ($outName -match '\{release_years\}') {
+                    $outName = $outName -replace '\{release_years\}',$releaseSlug
+                    $releaseIncluded = $true
+                }
+
+                # replace {slug} if present (we may still append slug later if not present)
+                $slugIncluded = $false
                 if ($outName -match '\{slug\}') {
                     $outName = $outName -replace '\{slug\}',$slug
+                    $slugIncluded = $true
+                }
+
+                # ensure release-years are present in the filename (if pattern didn't include them)
+                $ext = [IO.Path]::GetExtension($outName)
+                if (-not $ext) { $ext = '.ics' }
+                $base = if ($ext) { $outName.Substring(0, $outName.Length - $ext.Length) } else { $outName }
+
+                $appendParts = @()
+                if (-not $releaseIncluded) { $appendParts += $releaseSlug }
+                if (-not $slugIncluded) { $appendParts += $slug }
+
+                if ($appendParts.Count -gt 0) {
+                    # avoid duplicating separators
+                    $outName = "$base`_$($appendParts -join '_')$ext"
                 } else {
-                    # append slug before extension
-                    $ext = [IO.Path]::GetExtension($outName)
-                    if (-not $ext) { $ext = '.ics' }
-                    $base = if ($ext) { $outName.Substring(0, $outName.Length - $ext.Length) } else { $outName }
-                    $outName = "$base`_$slug$ext"
+                    $outName = "$base$ext"
                 }
 
                 $args = @()
                 $args += '--year'; $args += $y
                 $args += '--calendar-template'; $args += $tplArg
                 if ($monthsArg) { $args += '--months'; $args += $monthsArg }
+                if ($ReleaseYears) { $args += '--release-years'; $args += $ReleaseYears }
+                if ($IgnoreProduction) { $args += '--ignore-production' }
                 $args += '--out'; $args += $outName
 
             Write-Output "\nStarting: python .\python $($args -join ' ')"
