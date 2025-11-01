@@ -24,7 +24,7 @@ try {
         $Months = Read-Host "Gib Monat(e) ein (Komma-getrennt, z.B. 01,02) oder leer für Default-Listings [Enter=leer]"
     }
     if (-not $CalendarTemplate) {
-        $CalendarTemplate = Read-Host "Kalender-Template (oder Enter für Standard)"
+        $CalendarTemplate = Read-Host "Kalender-Template (blu-ray-filme; 3d-blu-ray-filme; 4k-uhd; serien; blu-ray-importe) [oder Enter für Standard]"
         if ([string]::IsNullOrWhiteSpace($CalendarTemplate)) {
             $CalendarTemplate = 'https://bluray-disc.de/4k-uhd/kalender?id={year}-{month:02d}'
         }

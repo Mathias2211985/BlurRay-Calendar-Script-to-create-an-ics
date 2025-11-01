@@ -173,6 +173,40 @@ Tipp: Teste ein Template zuerst mit einem einzigen Monat (`--months 01`) bevor d
 ## Automatisierung / Zeitplanung
 Verwende die mitgelieferte `run_scraper.ps1` oder trage den PowerShell‑Befehl in den Windows Aufgabenplaner ein, wenn das Skript regelmäßig laufen soll.
 
+### Double‑Click Starter (einfach per Doppelklick)
+
+Wenn du das Tool per Doppelklick starten möchtest (ohne manuelles Öffnen eines PowerShell‑Fensters), liegt eine kleine Batch‑Datei im Projekt, die beim Doppelklick ein PowerShell‑Fenster öffnet und das interaktive `run_scraper.ps1` startet.
+
+- Datei: `run_scraper_doubleclick.bat`
+- Zweck: startet `run_scraper.ps1` in einem neuen PowerShell‑Fenster, umgeht die ExecutionPolicy nur für diesen Aufruf und hält das Fenster offen, sodass du die Eingabeaufforderungen (Prompts) sehen und beantworten kannst.
+
+Inhalt (kurz):
+
+```text
+@echo off
+pushd "%~dp0"
+powershell -NoProfile -ExecutionPolicy Bypass -NoExit -File "%~dp0run_scraper.ps1"
+popd
+```
+
+So verwendest du die Datei:
+
+1. Öffne den Ordner `C:\Test\autostart` im Explorer.
+2. Doppelklicke auf `run_scraper_doubleclick.bat` — ein neues PowerShell‑Fenster öffnet sich.
+3. Folge den Eingabeaufforderungen (Jahr/Monat/Template/OutPattern).
+
+Alternative: Desktop‑Verknüpfung
+
+1. Rechtsklicke auf `run_scraper_doubleclick.bat` → Senden an → Desktop (Verknüpfung erstellen).
+2. Optional: Rechtsklick auf die Verknüpfung → Eigenschaften → Erweitert → "Als Administrator ausführen" (nur falls nötig).
+
+Sicherheits‑Hinweis
+
+- Die Batch‑Datei ruft PowerShell mit `-ExecutionPolicy Bypass` auf — das umgeht die lokale Ausführungsbeschränkung nur für diesen Aufruf. Verwende diese Methode nur, wenn du der Quelle der Skripte vertraust.
+- Wenn du lieber keine Policy‑Bypass verwenden möchtest, kannst du stattdessen die Datei freigeben (`Unblock-File .\run_scraper.ps1`) oder die ExecutionPolicy dauerhaft mit Bedacht anpassen (z. B. `Set-ExecutionPolicy -Scope CurrentUser -ExecutionPolicy RemoteSigned`).
+
+Wenn du möchtest, erstelle ich gerne automatisch eine Desktop‑Verknüpfung mit eigenem Icon und einem kurzen Hinweistext; sag kurz Bescheid und welche Art Icon (standard / eigenes PNG) du willst.
+
 Usage
 
 PowerShell (from repository root):
