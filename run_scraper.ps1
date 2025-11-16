@@ -39,6 +39,15 @@ try {
         $resp = Read-Host "Gib Release-Jahr(e) ein (Komma-getrennt, z.B. 2025 oder 2024,2025). Leer = ALL"
         if ([string]::IsNullOrWhiteSpace($resp)) { $ReleaseYears = $null } else { $ReleaseYears = $resp }
     }
+    
+    # NEW: Separate prompt for production years (what gets passed as --year to Python)
+    $ProductionYears = $null
+    $resp3 = Read-Host "Gib Produktions-Jahr(e) ein (Komma-getrennt, z.B. 2025 oder 2025,2026). [Enter = gleich wie Release-Jahre]"
+    if ([string]::IsNullOrWhiteSpace($resp3)) {
+        $ProductionYears = $ReleaseYears  # Use same as release years if not specified
+    } else {
+        $ProductionYears = $resp3
+    }
     # Determine IgnoreProduction: if provided as parameter, keep; otherwise ask the user interactively
     if ($PSBoundParameters.ContainsKey('IgnoreProduction')) {
         # passed on command line; keep as-is
@@ -64,10 +73,11 @@ try {
     $yearList = $Years -split '\s*,\s*' | Where-Object { -not [string]::IsNullOrWhiteSpace($_) }
     if ($Months) { $monthsArg = ($Months -split '\s*,\s*' | Where-Object { -not [string]::IsNullOrWhiteSpace($_) }) -join ',' } else { $monthsArg = '' }
 
-    Write-Output "Running scraper for years: $($yearList -join ', ')";
+    Write-Output "Running scraper for calendar years: $($yearList -join ', ')";
     if ($monthsArg) { Write-Output "Months: $monthsArg" } else { Write-Output "Using default listings (no --months)" }
     # show which release-years will be used (or ALL)
     if ([string]::IsNullOrWhiteSpace($ReleaseYears)) { Write-Output "Release-years: ALL" } else { Write-Output "Release-years: $ReleaseYears" }
+    if ([string]::IsNullOrWhiteSpace($ProductionYears)) { Write-Output "Production-years: DEFAULT" } else { Write-Output "Production-years: $ProductionYears" }
     Write-Output "Ignore-production: $([bool]$IgnoreProduction)"
 
     $results = @()
@@ -142,7 +152,14 @@ try {
                 }
 
                 $args = @()
-                $args += '--year'; $args += $y
+                # Use ProductionYears for --year if available, otherwise fall back to $y (calendar year)
+                if ($ProductionYears) {
+                    $args += '--year'; $args += $ProductionYears
+                } else {
+                    $args += '--year'; $args += $y
+                }
+                # Always pass the calendar year explicitly to avoid confusion
+                $args += '--calendar-year'; $args += $y
                 $args += '--calendar-template'; $args += $tplArg
                 if ($monthsArg) { $args += '--months'; $args += $monthsArg }
                 if ($ReleaseYears) { $args += '--release-years'; $args += $ReleaseYears }

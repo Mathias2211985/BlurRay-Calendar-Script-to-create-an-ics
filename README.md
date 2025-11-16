@@ -42,7 +42,7 @@ python .\python --year 2025 --out bluray_2025_4k.ics
 ```
 
 CLI‑Optionen (Kurzüberblick)
-- `--year YEAR` — Produktionsjahr, nach dem explizit gesucht wird (default: 2025)
+- `--year YEARS` — **Produktionsjahr(e)**, nach denen explizit gesucht wird (default: "2025"). **NEUE FUNKTION**: Unterstützt jetzt mehrere Jahre komma-getrennt, z.B. `--year "2025,2026"` für Filme die 2025 ODER 2026 produziert wurden.
 - `--calendar-template URL` — Template für Monats‑Kalenderseiten; Platzhalter `{year}` und `{month:02d}` möglich
 - `--months M1,M2,...` — Komma‑separierte Monatsnummern (z. B. `01,02,03`). Wenn weggelassen, werden die Standard‑Listing‑Seiten gecrawlt.
 - `--out PATH` — Ziel‑ICS Datei. Unterstützt zusätzlich die Platzhalter `{slug}` und `{release_years}`.
@@ -51,15 +51,53 @@ CLI‑Optionen (Kurzüberblick)
   - Wenn eines der Tokens nicht vorhanden ist, fügt `run_scraper.ps1` fehlende Teile automatisch vor der Dateiendung ein, um Überschreibungen zu vermeiden (z. B. `bluray_2025_12_2025-2026_4k-uhd.ics`).
 - `--release-years YEARS` — Optional: Komma‑separierte RELEASE‑Jahre (bezogen auf das Veröffentlichungsdatum/`DTSTART`), z. B. `--release-years "2024,2025"`.
   - Wenn gesetzt, werden nur Events berücksichtigt, deren `DTSTART` in einem dieser Jahre liegt.
+  - **WICHTIG**: Diese filtern nach dem **Erscheinungsdatum** der Filme, nicht nach dem Produktionsjahr!
   - Wenn du `run_scraper.ps1` interaktiv startest und `-ReleaseYears` nicht übergeben hast, fragt der Runner VOR dem Erstellen des Dateinamens nach den Release‑Jahren, damit die Auswahl in den Dateinamen eingebettet werden kann.
 - `--ignore-production` — Optional: Wenn gesetzt, wird die Produktionsjahr‑Prüfung deaktiviert. Nützlich, wenn du ausschließlich nach dem Veröffentlichungsjahr (DTSTART) filtern möchtest und Seiten ohne ein explizites "Produktion:"-Feld trotzdem berücksichtigen willst.
   - Runner‑Param: `-IgnoreProduction` (weitergereicht als `--ignore-production` an Python).
 - `--only-production` — Wenn gesetzt, gilt die traditionelle Filterung: es werden nur Einträge aufgenommen, deren Detailseite ausdrücklich `Produktion: <YEAR>` enthält (nutzt `--year`, Standard 2025). Wenn du dieses Flag nicht setzt, ist das Standardverhalten: alle gefundenen Detailseiten werden berücksichtigt (du kannst zusätzlich `--release-years` verwenden, um die Results nach Veröffentlichungsjahr einzuschränken).
 - `--max-pages N` — Max. Seiten pro Listing (Schutz gegen Endlosschleifen)
 
-## Interaktives Abfragen der Release‑Jahre
+## PowerShell Runner - Interaktive Eingaben
 
-Interactive Release‑Jahre (Runner behaviour)
+Der `run_scraper.ps1` PowerShell-Runner fragt jetzt nach **drei separaten Eingaben** für maximale Flexibilität:
+
+### 1. Kalender-Jahre
+**Eingabe**: "Gib Jahr(e) ein (Komma-getrennt, z.B. 2025 oder 2024,2025)"
+- **Zweck**: Bestimmt, welche **Kalender-Seiten** gecrawlt werden
+- **Beispiel**: `2026` → crawlt nur 2026-Kalender-Seiten
+- **Beispiel**: `2025,2026` → crawlt sowohl 2025- als auch 2026-Kalender-Seiten
+
+### 2. Release-Jahre  
+**Eingabe**: "Gib Release-Jahr(e) ein (Komma-getrennt, z.B. 2025 oder 2024,2025). Leer = ALL"
+- **Zweck**: Filtert Filme nach dem **Erscheinungsdatum** (wann sie in den Handel kommen)
+- **Beispiel**: `2025,2026` → nur Filme die 2025 oder 2026 released werden
+- **Leer lassen**: Alle gefundenen Filme, egal wann sie erscheinen
+
+### 3. Produktions-Jahre *(NEU!)*
+**Eingabe**: "Gib Produktions-Jahr(e) ein (Komma-getrennt, z.B. 2025 oder 2025,2026). [Enter = gleich wie Release-Jahre]"
+- **Zweck**: Filtert Filme nach dem **Produktionsjahr** (wann sie gedreht wurden)  
+- **Beispiel**: `2025,2026` → nur Filme die 2025 oder 2026 produziert wurden
+- **Leer lassen**: Verwendet die gleichen Jahre wie Release-Jahre
+
+### 4. Produktionsjahr-Prüfung
+**Eingabe**: "Ignoriere Produktionsjahr-Prüfung? (J/n)"
+- **J** (Standard): Ignoriert Produktionsjahre komplett, nimmt alle gefundenen Filme
+- **n**: Verwendet die angegebenen Produktions-Jahre zum Filtern
+
+## Beispiel-Szenario
+
+**Du suchst**: Filme mit Produktionsjahr 2025, die 2026 released werden
+
+**Eingaben**:
+```
+Kalender-Jahre: 2026          (crawlt 2026-Kalender)
+Release-Jahre: 2026           (nur 2026-Releases)  
+Produktions-Jahre: 2025       (nur 2025-Produktionen)
+Produktionsjahr-Prüfung: n    (Prüfung aktivieren)
+```
+
+**Ergebnis**: Script crawlt 2026-Kalender-Seiten und findet Filme wie "Das Kanu des Manitu 4K" (prod=2025, release=2026-01-02) ✅
 
  
  Beispiel — Aufruf mit Ignorieren der Produktionsprüfung
@@ -98,9 +136,9 @@ Interactive Release‑Jahre (Runner behaviour)
  Hinweis: Die tatsächlichen Events hängen von den Seiteninhalten ab; mit `-IgnoreProduction` werden Einträge mit passendem Veröffentlichungsjahr aufgenommen, auch wenn kein explizites "Produktion:"-Feld vorhanden ist.
 - Wenn du das Python‑Skript direkt ausführst, fragt es ebenfalls interaktiv (nur wenn stdin ein TTY ist) nach `--release-years`, falls das Argument nicht bereits gesetzt wurde.
 
-Beispiele:
+## Beispiele
 
-Interaktiv (Runner fragt nach Jahren, Prompt erscheint vor dem Dateinamen‑Prompt):
+### Interaktiv (Runner fragt nach allen Parametern):
 
 ```powershell
 Set-Location -LiteralPath 'C:\Test\autostart'
@@ -108,13 +146,31 @@ Set-Location -LiteralPath 'C:\Test\autostart'
 # Oder per Doppelklick die mitgelieferte run_scraper_doubleclick.bat
 ```
 
-Non‑interactive (Parameter übergeben):
+### Non‑interactive (Parameter übergeben):
 
 ```powershell
-powershell -NoProfile -ExecutionPolicy Bypass -File .\run_scraper.ps1 -Years '2025' -Months '12' -CalendarTemplate '4k-uhd' -OutPattern 'bluray_{year}_{months}.ics' -ReleaseYears '2025'
+# PowerShell Runner mit allen Parametern
+powershell -NoProfile -ExecutionPolicy Bypass -File .\run_scraper.ps1 -Years '2026' -Months '01,02' -CalendarTemplate '4k-uhd' -OutPattern 'bluray_{year}_{months}_{release_years}.ics' -ReleaseYears '2025,2026'
 
-# Oder Python direkt:
-python -u .\python --release-years "2024,2025" --calendar-template "https://bluray-disc.de/4k-uhd/kalender?id={year}-{month:02d}" --months 12 --out bluray_2024-2025_12.ics
+# Python direkt mit neuer Mehrfach-Jahr-Syntax:
+python -u .\python --year "2025,2026" --release-years "2025,2026" --calendar-template "https://bluray-disc.de/4k-uhd/kalender?id={year}-{month:02d}" --months 01,02 --out bluray_multi_year.ics
+```
+
+### Praktische Anwendungsfälle:
+
+**1. Aktuelle Filme (produziert 2024/2025, erscheinen 2025/2026):**
+```powershell
+python -u .\python --year "2024,2025" --release-years "2025,2026" --calendar-template "https://bluray-disc.de/4k-uhd/kalender?id={year}-{month:02d}" --months 01,02,03 --out current_movies.ics
+```
+
+**2. Klassiker-Neuauflagen (alte Produktionsjahre, neue Releases):**
+```powershell
+python -u .\python --year "1990,1995,2000" --release-years "2025" --ignore-production --out classics_remastered.ics
+```
+
+**3. Nur Release-Filter (ignoriere Produktionsjahr komplett):**
+```powershell
+python -u .\python --release-years "2025,2026" --ignore-production --out all_releases_2025_2026.ics
 ```
 
 Hinweis: Standard ist „ALL“ — du musst nichts eingeben, wenn du alle gefundenen Einträge behalten willst.

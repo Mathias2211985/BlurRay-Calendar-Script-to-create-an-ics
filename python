@@ -75,25 +75,77 @@ def parse_detail_page(html):
 
     # Suche nach Produktionsjahr - die Seite führt öfters "Produktion: 2025" oder es ist in Klammern im Titel
     text = soup.get_text(" ", strip=True)
-    # Suche "Produktion" gefolgt von Jahr
-    # Try to find an explicit "Produktion" label and extract the first 4-digit year
-    # that appears shortly after it. This covers variants like:
+    # Erweiterte Suche nach Produktionsjahr unter "Produktion:" Abschnitt
+    # Try to find an explicit "Produktion" label and extract ALL 4-digit years
+    # that appear in the production section. This covers variants like:
     #   Produktion: USA / 1990
     #   Produktion: Neuseeland / 2025
     #   Produktion\nUSA / 1990
+    #   Produktion: Deutschland/Frankreich 2024
+    production_years = []
     m = re.search(r"Produktion\b", text, flags=re.IGNORECASE)
     if m:
-        # look at the next N characters after the label for a 4-digit year
-        start = m.end()
-        snippet = text[start:start+200]
-        y = re.search(r"([0-9]{4})", snippet)
-        if y:
-            try:
-                result["production_year"] = int(y.group(1))
-            except Exception:
-                pass
-    # NOTE: do NOT infer production year from a bare parenthetical like (2025) elsewhere on the page
-    # Many listings use parentheses for release/edition years which are not the production year.
+        # look at the next 500 characters after the label for all 4-digit years
+        start = m.start()
+        # Find the end of the production section (until next major section or end of reasonable text)
+        end_markers = [r"\bRegie\b", r"\bDarsteller\b", r"\bGenre\b", r"\bLaufzeit\b", r"\bSprache\b", r"\bBildformat\b", r"\bTonformat\b", r"\bFSK\b"]
+        end_pos = len(text)
+        for marker in end_markers:
+            match = re.search(marker, text[start+50:], flags=re.IGNORECASE)  # skip first 50 chars to avoid false matches
+            if match:
+                candidate_end = start + 50 + match.start()
+                end_pos = min(end_pos, candidate_end)
+        
+        # Limit to reasonable section size (max 800 chars)
+        end_pos = min(end_pos, start + 800)
+        snippet = text[start:end_pos]
+        
+        # Find all 4-digit years in the production section
+        for y_match in re.finditer(r"([0-9]{4})", snippet):
+            year = int(y_match.group(1))
+            # Only consider years that could realistically be production years (1900-2030)
+            if 1900 <= year <= 2030:
+                production_years.append(year)
+        
+        # Choose the most recent/relevant production year
+        if production_years:
+            # Remove duplicates and sort
+            production_years = sorted(set(production_years), reverse=True)
+            # Prefer years closer to current time (within reasonable range)
+            current_year = datetime.now().year
+            # Look for years within a reasonable production range (current year - 5 to current year + 5)
+            reasonable_years = [y for y in production_years if current_year - 5 <= y <= current_year + 5]
+            if reasonable_years:
+                result["production_year"] = reasonable_years[0]  # Most recent reasonable year
+            else:
+                result["production_year"] = production_years[0]  # Most recent year overall
+    
+    # Additional pattern: look for "Country / YYYY" format which is common on bluray-disc.de
+    if result["production_year"] is None:
+        # Pattern like "Deutschland / 2025" or "USA / 2024"
+        country_year_pattern = r"([A-Za-zäöüÄÖÜß]+(?:\s*/\s*[A-Za-zäöüÄÖÜß]+)*)\s*/\s*([0-9]{4})"
+        for match in re.finditer(country_year_pattern, text):
+            year = int(match.group(2))
+            current_year = datetime.now().year
+            # Only consider reasonable production years
+            if current_year - 5 <= year <= current_year + 5:
+                result["production_year"] = year
+                break
+    
+    # Fallback: if no production section found, try looking for years in parentheses near the title
+    # but be more selective about this
+    if result["production_year"] is None and result["title"]:
+        # Look for (YYYY) patterns near the title, but only consider reasonable production years
+        title_area = text[:500]  # First 500 chars should contain title area
+        for y_match in re.finditer(r"\(([0-9]{4})\)", title_area):
+            year = int(y_match.group(1))
+            current_year = datetime.now().year
+            if current_year - 5 <= year <= current_year + 5:  # Only recent/upcoming years
+                result["production_year"] = year
+                break
+    
+    # NOTE: Improved logic now searches entire production section for any valid years
+    # and uses heuristics to pick the most likely production year
 
     # Release-Datum: suche nach Formaten wie "Ab 07.11.2025" oder "07.11.2025" oder "07. November 2025"
     # mehrere Muster versuchen:
@@ -182,7 +234,8 @@ def main():
     candidates = {}
 
     parser = argparse.ArgumentParser(description='BlurayDisc scraper')
-    parser.add_argument('--year', type=int, default=2025, help='Produktion year to filter (default 2025)')
+    parser.add_argument('--year', type=str, default='2025', help='Production year(s) to filter (comma-separated, e.g. "2025" or "2025,2026", default 2025)')
+    parser.add_argument('--calendar-year', type=str, default=None, help='Calendar year for URL template (e.g. "2026"). If not specified, uses first production year from --year.')
     parser.add_argument('--release-years', type=str, default=None, help='Optional: comma-separated RELEASE years to require (based on parsed DTSTART year), e.g. "2024,2025"')
     parser.add_argument('--only-production', action='store_true', default=False, help='If set, require the production year match (--year). By default all found items are included unless --release-years is used or --only-production is set.')
     parser.add_argument('--ignore-production', action='store_true', default=False, help='If set, ignore production-year checks even if --year is provided (useful when you only want to filter by --release-years).')
@@ -205,7 +258,24 @@ def main():
         # if anything goes wrong (non-interactive environment), keep args as-is
         pass
 
-    target_year = args.year
+    # Parse production years from --year parameter (support comma-separated)
+    production_years = None
+    if args.year:
+        try:
+            production_years = [int(x.strip()) for x in args.year.split(',') if x.strip()]
+        except Exception:
+            production_years = [2025]  # fallback
+    else:
+        production_years = [2025]
+    
+    # Parse calendar year (for URL template) - can be different from production years
+    if args.calendar_year:
+        try:
+            target_year = int(args.calendar_year.strip())
+        except Exception:
+            target_year = production_years[0]
+    else:
+        target_year = production_years[0]  # fallback to first production year
     session = create_session()
 
     # Build pages list: if user provided a calendar-template, expand months from that template
@@ -293,6 +363,9 @@ def main():
                     prod_filter_active = False
                 else:
                     prod_filter_active = has_year_arg or args.only_production
+                
+                # Debug logging to understand filtering decisions
+                logging.debug(f"Filter state for '{title}': has_year_arg={has_year_arg}, only_production={args.only_production}, ignore_production={getattr(args, 'ignore_production', False)}, prod_filter_active={prod_filter_active}")
 
                 # Evaluate individual filter predicates (they are ANDed)
                 #  - release predicate: if --release-years provided, require rdate year in that list; otherwise pass
@@ -301,11 +374,14 @@ def main():
                 else:
                     pass_release = bool(rdate and getattr(rdate, 'year', None) in release_years)
 
-                #  - production predicate: if production filter active, require production_year == target_year; otherwise pass
+                #  - production predicate: if production filter active, require production_year in production_years list; otherwise pass
                 if not prod_filter_active:
                     pass_production = True
                 else:
-                    pass_production = (py is not None and py == target_year)
+                    pass_production = (py is not None and py in production_years)
+                
+                # Debug logging for production filter decision
+                logging.debug(f"Production filter for '{title}': prod_filter_active={prod_filter_active}, py={py}, production_years={production_years}, pass_production={pass_production}")
 
                 include_candidate = bool(pass_release and pass_production)
 
@@ -410,7 +486,8 @@ def main():
                 break
             page += 1
 
-    outname = args.out.replace('YYYY', str(target_year)).replace('MM', 'year')
+    # Use first production year for filename generation
+    outname = args.out.replace('YYYY', str(production_years[0])).replace('MM', 'year')
     # After crawling, build calendar events from chosen candidates (deduplicated)
     for key, cand in candidates.items():
         title = cand.get('title')
@@ -433,7 +510,7 @@ def main():
             ev.add('description', f"Quelle: {link}")
             ev['uid'] = f"{abs(hash(link))}@bluray-disc.de"
             cal.add_component(ev)
-            logging.info(f'Added (no date) production {target_year}: {title} ({link})')
+            logging.info(f'Added (no date) production {production_years}: {title} ({link})')
 
     with open(outname, 'wb') as f:
         f.write(cal.to_ical())
