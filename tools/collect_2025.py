@@ -86,10 +86,11 @@ for page in MONTH_PAGES:
             print('ERR fetch', link, e)
             continue
         title, py, rdate = parse_meta(d)
-        if py == 2025:
+        target_year = datetime.now().year
+        if py == target_year:
             found.append((title, py, rdate, link))
 
-print('\n=== Found items with production_year == 2025 ===')
+print(f'\n=== Found items with production_year == {datetime.now().year} ===')
 for t, py, rd, l in found:
     print('-', t, '|', py, '|', rd, '|', l)
 print('TOTAL:', len(found))

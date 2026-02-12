@@ -144,7 +144,8 @@ def main():
             py = meta.get("production_year")
             rdate = meta.get("release_date")
             print(" -> meta:", title, py, rdate)
-            if py == 2025:
+            target_year = datetime.now().year
+            if py == target_year:
                 if rdate:
                     if rdate.month in (11, 12):
                         found.append((title, rdate, link))
@@ -158,9 +159,10 @@ def main():
                 else:
                     found.append((title, None, link))
 
-    with open("bluray_2025_nov_dec_debug.ics", "wb") as f:
+    outfile = f"bluray_{datetime.now().year}_debug.ics"
+    with open(outfile, "wb") as f:
         f.write(cal.to_ical())
-    print(f"Fertig. {len(found)} Einträge gefunden. ICS erzeugt: bluray_2025_nov_dec_debug.ics")
+    print(f"Fertig. {len(found)} Einträge gefunden. ICS erzeugt: {outfile}")
     for t, d, l in found:
         print("-", t, "|", d, "|", l)
 

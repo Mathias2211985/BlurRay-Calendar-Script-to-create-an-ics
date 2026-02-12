@@ -18,9 +18,10 @@ Set-StrictMode -Version Latest
 Push-Location -LiteralPath $PSScriptRoot
 try {
     # Prompt interactively if parameters were not provided
+    $currentYear = (Get-Date).Year.ToString()
     if (-not $Years) {
-        $Years = Read-Host "Gib Jahr(e) ein (Komma-getrennt, z.B. 2025 oder 2024,2025) [default: 2025]"
-        if ([string]::IsNullOrWhiteSpace($Years)) { $Years = '2025' }
+        $Years = Read-Host "Gib Jahr(e) ein (Komma-getrennt, z.B. $currentYear oder $($currentYear),$([int]$currentYear+1)) [default: $currentYear]"
+        if ([string]::IsNullOrWhiteSpace($Years)) { $Years = $currentYear }
     }
     if (-not $Months) {
         $Months = Read-Host "Gib Monat(e) ein (Komma-getrennt, z.B. 01,02) oder leer für Default-Listings [Enter=leer]"
@@ -167,7 +168,7 @@ try {
                 $args += '--out'; $args += $outName
 
             Write-Output "\nStarting: python .\python $($args -join ' ')"
-            & python '-u' '.\python' @args
+            & python '-u' '.\scraper.py' @args
             $exit = $LASTEXITCODE
             $results += [PSCustomObject]@{ Year = $y; Template = $tplArg; Out = $outName; Exit = $exit }
         }

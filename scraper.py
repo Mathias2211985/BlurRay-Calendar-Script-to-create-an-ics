@@ -1,0 +1,583 @@
+# Benötigte Pakete:
+# pip install requests beautifulsoup4 icalendar
+
+import argparse
+import requests
+from requests.adapters import HTTPAdapter
+from urllib3.util.retry import Retry
+from bs4 import BeautifulSoup
+from icalendar import Calendar, Event
+from datetime import datetime, timezone
+import time
+import re
+from urllib.parse import urljoin
+import logging
+
+BASE = "https://bluray-disc.de"
+
+# Listing pages to crawl (we paginate these). Focus is on year, not specific months.
+MONTH_PAGES = [
+    "https://bluray-disc.de/4k-uhd/neuerscheinungen?page=0",
+    "https://bluray-disc.de/4k-uhd?page=0",
+    "https://bluray-disc.de/4k-uhd/filme?page=0",
+]
+MAX_PAGES = 20
+
+HEADERS = {"User-Agent": "Mozilla/5.0 (compatible; BluRayScraper/1.0)"}
+logging.basicConfig(level=logging.INFO, format='%(asctime)s %(levelname)s: %(message)s')
+
+def create_session():
+    s = requests.Session()
+    retries = Retry(total=3, backoff_factor=0.5, status_forcelist=(500,502,503,504))
+    s.mount('https://', HTTPAdapter(max_retries=retries))
+    s.headers.update(HEADERS)
+    return s
+
+
+def fetch(session, url, timeout=15):
+    logging.debug(f"FETCH -> {url}")
+    r = session.get(url, timeout=timeout)
+    r.raise_for_status()
+    return r.text
+
+def extract_item_links_from_month_page(html):
+    """
+    sucht auf der Monatsseite nach Links zu Film-/Item-Detailseiten.
+    Die Struktur kann sich ändern; daher werden mehrere Selektoren probiert.
+    """
+    soup = BeautifulSoup(html, "html.parser")
+    links = set()
+
+    # Try to find links that point to film detail pages. Accept both
+    # /blu-ray-filme/<id>-... and /blu-ray-news/filme/<id>-... (both occur on the site).
+    for a in soup.select("a"):
+        href = a.get("href", "")
+        if not href:
+            continue
+        full = urljoin(BASE, href.split("?")[0].split('#')[0])
+        # accept film detail pages when they contain a numeric id segment
+        if re.search(r"/blu-ray-filme/\d+", full) or re.search(r"/blu-ray-news/filme/\d+", full):
+            links.add(full)
+    return list(links)
+
+def parse_detail_page(html):
+    """
+    Extrahiert Titel, Release-Datum (wenn vorhanden) und Produktionsjahr (falls angezeigt).
+    Rückgabe: dict mit keys: title, release_date (datetime.date oder None), production_year (int or None)
+    """
+    soup = BeautifulSoup(html, "html.parser")
+    result = {"title": None, "release_date": None, "production_year": None, "url": None, "detected_formats": []}
+
+    # Titel
+    h1 = soup.find(["h1", "h2"])
+    if h1:
+        result["title"] = h1.get_text(strip=True)
+
+    # Detect format/category from page content and breadcrumbs
+    formats = set()
+    # Check breadcrumbs and navigation for category hints
+    for nav in soup.select("nav, .breadcrumb, .breadcrumbs, ol.breadcrumb"):
+        nav_text = nav.get_text(" ", strip=True).lower()
+        if "4k" in nav_text or "uhd" in nav_text or "ultra hd" in nav_text:
+            formats.add("4k-uhd")
+        if "serie" in nav_text:
+            formats.add("serien")
+        if "3d" in nav_text:
+            formats.add("3d-blu-ray-filme")
+        if "import" in nav_text:
+            formats.add("blu-ray-importe")
+    # Check links on the page that point to category sections
+    for a in soup.select("a"):
+        href = (a.get("href") or "").lower()
+        if "/4k-uhd/" in href or "/4k-uhd?" in href:
+            formats.add("4k-uhd")
+        if "/serien/" in href or "/serien?" in href:
+            formats.add("serien")
+        if "/3d-blu-ray" in href:
+            formats.add("3d-blu-ray-filme")
+        if "/blu-ray-importe/" in href:
+            formats.add("blu-ray-importe")
+    # Check page text for format keywords
+    page_text_lower = soup.get_text(" ", strip=True).lower()
+    # Look for explicit format labels commonly used on bluray-disc.de
+    if re.search(r"\b4k\s*ultra\s*hd\b", page_text_lower) or re.search(r"\b4k\s*uhd\b", page_text_lower):
+        formats.add("4k-uhd")
+    if re.search(r"\bserie\b|\bstaffel\b|\bseason\b|\bepisode\b", page_text_lower):
+        formats.add("serien")
+    if re.search(r"\b3d\s*blu[\s-]?ray\b", page_text_lower):
+        formats.add("3d-blu-ray-filme")
+    # Check the URL itself for category hints
+    result["detected_formats"] = list(formats)
+
+    # Suche nach Produktionsjahr - die Seite führt öfters "Produktion: 2025" oder es ist in Klammern im Titel
+    text = soup.get_text(" ", strip=True)
+    # Erweiterte Suche nach Produktionsjahr unter "Produktion:" Abschnitt
+    # Try to find an explicit "Produktion" label and extract ALL 4-digit years
+    # that appear in the production section. This covers variants like:
+    #   Produktion: USA / 1990
+    #   Produktion: Neuseeland / 2025
+    #   Produktion\nUSA / 1990
+    #   Produktion: Deutschland/Frankreich 2024
+    production_years = []
+    m = re.search(r"Produktion\b", text, flags=re.IGNORECASE)
+    if m:
+        # look at the next 500 characters after the label for all 4-digit years
+        start = m.start()
+        # Find the end of the production section (until next major section or end of reasonable text)
+        end_markers = [r"\bRegie\b", r"\bDarsteller\b", r"\bGenre\b", r"\bLaufzeit\b", r"\bSprache\b", r"\bBildformat\b", r"\bTonformat\b", r"\bFSK\b"]
+        end_pos = len(text)
+        for marker in end_markers:
+            match = re.search(marker, text[start+50:], flags=re.IGNORECASE)  # skip first 50 chars to avoid false matches
+            if match:
+                candidate_end = start + 50 + match.start()
+                end_pos = min(end_pos, candidate_end)
+        
+        # Limit to reasonable section size (max 800 chars)
+        end_pos = min(end_pos, start + 800)
+        snippet = text[start:end_pos]
+        
+        # Find all 4-digit years in the production section
+        for y_match in re.finditer(r"([0-9]{4})", snippet):
+            year = int(y_match.group(1))
+            # Only consider years that could realistically be production years (1900-2030)
+            if 1900 <= year <= 2030:
+                production_years.append(year)
+        
+        # Choose the most recent/relevant production year
+        if production_years:
+            # Remove duplicates and sort
+            production_years = sorted(set(production_years), reverse=True)
+            # Prefer years closer to current time (within reasonable range)
+            current_year = datetime.now().year
+            # Look for years within a reasonable production range (current year - 5 to current year + 5)
+            reasonable_years = [y for y in production_years if current_year - 5 <= y <= current_year + 5]
+            if reasonable_years:
+                result["production_year"] = reasonable_years[0]  # Most recent reasonable year
+            else:
+                result["production_year"] = production_years[0]  # Most recent year overall
+    
+    # Additional pattern: look for "Country / YYYY" format which is common on bluray-disc.de
+    if result["production_year"] is None:
+        # Pattern like "Deutschland / 2025" or "USA / 2024"
+        country_year_pattern = r"([A-Za-zäöüÄÖÜß]+(?:\s*/\s*[A-Za-zäöüÄÖÜß]+)*)\s*/\s*([0-9]{4})"
+        for match in re.finditer(country_year_pattern, text):
+            year = int(match.group(2))
+            current_year = datetime.now().year
+            # Only consider reasonable production years
+            if current_year - 5 <= year <= current_year + 5:
+                result["production_year"] = year
+                break
+    
+    # Fallback: if no production section found, try looking for years in parentheses near the title
+    # but be more selective about this
+    if result["production_year"] is None and result["title"]:
+        # Look for (YYYY) patterns near the title, but only consider reasonable production years
+        title_area = text[:500]  # First 500 chars should contain title area
+        for y_match in re.finditer(r"\(([0-9]{4})\)", title_area):
+            year = int(y_match.group(1))
+            current_year = datetime.now().year
+            if current_year - 5 <= year <= current_year + 5:  # Only recent/upcoming years
+                result["production_year"] = year
+                break
+    
+    # NOTE: Improved logic now searches entire production section for any valid years
+    # and uses heuristics to pick the most likely production year
+
+    # Release-Datum: suche nach Formaten wie "Ab 07.11.2025" oder "07.11.2025" oder "07. November 2025"
+    # mehrere Muster versuchen:
+    date_patterns = [
+        r"Ab\s+([0-3]?\d\.[01]?\d\.[0-9]{4})",
+        r"ab\s+([0-3]?\d\.[01]?\d\.[0-9]{4})",
+        r"([0-3]?\d\.\s*(?:Januar|Februar|März|April|Mai|Juni|Juli|August|September|Oktober|November|Dezember)\s*[0-9]{4})",
+        r"([0-3]?\d\.[01]?\d\.[0-9]{4})"
+    ]
+    month_dict = {
+        "Januar":"01","Februar":"02","März":"03","April":"04","Mai":"05","Juni":"06",
+        "Juli":"07","August":"08","September":"09","Oktober":"10","November":"11","Dezember":"12"
+    }
+    # prefer searching close to the title (avoid finding page meta publish dates)
+    snippet = text
+    if result["title"]:
+        idx = text.find(result["title"])
+        if idx >= 0:
+            snippet = text[idx:idx+800]
+
+    for pat in date_patterns:
+        mm = re.search(pat, snippet, flags=re.IGNORECASE)
+        if not mm:
+            mm = re.search(pat, text, flags=re.IGNORECASE)
+        if mm:
+            s = mm.group(1)
+            s = s.strip()
+            # replace month names with numeric month
+            for name, num in month_dict.items():
+                if re.search(name, s, flags=re.IGNORECASE):
+                    s = re.sub(name, "."+num+".", s, flags=re.IGNORECASE)
+            # keep only digits, dots and whitespace, then collapse duplicate dots
+            s = re.sub(r"[^0-9\.\s]", "", s)
+            s = re.sub(r"\.{2,}", ".", s)
+            s = s.replace(" ", "")
+            # try several parse attempts
+            for fmt in ("%d.%m.%Y", "%d.%m.%y"):
+                try:
+                    dt = datetime.strptime(s, fmt)
+                    result["release_date"] = dt.date()
+                    result["raw_date"] = s
+                    break
+                except Exception:
+                    pass
+
+            # if we only found day.month (no year), try to infer year 2025 when sensible
+            if result.get("release_date") is None:
+                m_short = re.search(r"([0-3]?\d\.[01]?\d)\.?$", s)
+                if m_short:
+                    daymonth = m_short.group(1)
+                    # infer year 2025 if month is 11 or 12
+                    try:
+                        inferred_year = str(datetime.now().year)
+                        dm = datetime.strptime(daymonth + "." + inferred_year, "%d.%m.%Y")
+                        result["release_date"] = dm.date()
+                        result["raw_date"] = daymonth + "." + inferred_year
+                    except Exception:
+                        pass
+
+            # fallback: if no date yet, try to find day.month + year within nearby text
+            if result.get("release_date") is None:
+                m2 = re.search(r"([0-3]?\d\.[01]?\d)\D{0,30}([0-9]{4})", snippet)
+                if not m2:
+                    m2 = re.search(r"([0-3]?\d\.[01]?\d)\D{0,30}([0-9]{4})", text)
+                if m2:
+                    candidate = f"{m2.group(1)}.{m2.group(2)}"
+                    candidate = re.sub(r"\.{2,}", ".", candidate)
+                    try:
+                        dt = datetime.strptime(candidate, "%d.%m.%Y")
+                        result["release_date"] = dt.date()
+                        result["raw_date"] = candidate
+                    except Exception:
+                        pass
+            if result.get("release_date"):
+                break
+
+    return result
+
+def main():
+    cal = Calendar()
+    cal.add('prodid', '-//BlurayDisc Scraper//de//')
+    cal.add('version', '2.0')
+
+    found = []
+    visited = set()
+    # candidates: normalized_title -> candidate dict {title, release_date, url}
+    candidates = {}
+
+    parser = argparse.ArgumentParser(description='BlurayDisc scraper')
+    current_year = str(datetime.now().year)
+    parser.add_argument('--year', type=str, default=current_year, help=f'Production year(s) to filter (comma-separated, e.g. "{current_year}" or "{current_year},{int(current_year)+1}", default {current_year})')
+    parser.add_argument('--calendar-year', type=str, default=None, help='Calendar year for URL template (e.g. "2026"). If not specified, uses first production year from --year.')
+    parser.add_argument('--release-years', type=str, default=None, help='Optional: comma-separated RELEASE years to require (based on parsed DTSTART year), e.g. "2024,2025"')
+    parser.add_argument('--only-production', action='store_true', default=False, help='If set, require the production year match (--year). By default all found items are included unless --release-years is used or --only-production is set.')
+    parser.add_argument('--ignore-production', action='store_true', default=False, help='If set, ignore production-year checks even if --year is provided (useful when you only want to filter by --release-years).')
+    parser.add_argument('--out', type=str, default='bluray_YYYY_year.ics', help='Output ICS filename pattern')
+    parser.add_argument('--calendar-template', type=str, default=None, help='Optional URL template for calendar pages, e.g. "https://bluray-disc.de/4k-uhd/kalender?id={year}-{month:02d}"')
+    parser.add_argument('--months', type=str, default=None, help='Comma-separated months or range (e.g. "01,02" or "01-03"). If omitted and --calendar-template given, defaults to all 12 months.')
+    parser.add_argument('--category', type=str, default=None, help='Category slug (e.g. "4k-uhd", "blu-ray-filme", "serien"). Used to filter detail pages by format.')
+    args = parser.parse_args()
+
+    # Interactive prompt for release-years when not provided and running interactively
+    # Default behavior: all years (None). If user types comma-separated years, we keep that string.
+    try:
+        import sys
+        if args.release_years is None and sys.stdin.isatty():
+            resp = input('Release-Jahr(e) eingeben (komma-getrennt), oder leer für alle [Enter]: ').strip()
+            if resp == '':
+                args.release_years = None
+            else:
+                args.release_years = resp
+    except Exception:
+        # if anything goes wrong (non-interactive environment), keep args as-is
+        pass
+
+    # Parse production years from --year parameter (support comma-separated)
+    production_years = None
+    if args.year:
+        try:
+            production_years = [int(x.strip()) for x in args.year.split(',') if x.strip()]
+        except Exception:
+            production_years = [datetime.now().year]  # fallback
+    else:
+        production_years = [datetime.now().year]
+    
+    # Parse calendar year (for URL template) - can be different from production years
+    if args.calendar_year:
+        try:
+            target_year = int(args.calendar_year.strip())
+        except Exception:
+            target_year = production_years[0]
+    else:
+        target_year = production_years[0]  # fallback to first production year
+    session = create_session()
+
+    # Build pages list: if user provided a calendar-template, expand months from that template
+    if args.calendar_template:
+        # parse months
+        def parse_months(s):
+            if not s:
+                return list(range(1,13))
+            parts = s.split(',')
+            months = []
+            for p in parts:
+                p = p.strip()
+                if '-' in p:
+                    a,b = p.split('-',1)
+                    months.extend(range(int(a), int(b)+1))
+                else:
+                    months.append(int(p))
+            return sorted(set(months))
+
+        month_nums = parse_months(args.months)
+
+        # If the provided calendar_template looks like a full URL (starts with http or contains ://)
+        # we'll use it directly. Otherwise we treat it as a small segment (e.g. "{year}-{month:02d}")
+        # and embed it into the canonical calendar path.
+        def make_page(m):
+            seg = args.calendar_template.format(year=target_year, month=m)
+            if seg.lower().startswith('http') or '://' in seg:
+                return seg
+            # embed as id value into the canonical calendar path by default
+            return f"https://bluray-disc.de/calendar_template/kalender?id={seg}"
+
+        pages = [make_page(m) for m in month_nums]
+    else:
+        pages = MONTH_PAGES
+
+    for month_url in pages:
+        page = 0
+        while True:
+            url = re.sub(r'page=\d+', f'page={page}', month_url)
+            logging.info(f'Loading month page: {url}')
+            try:
+                html = fetch(session, url)
+            except Exception as e:
+                logging.warning(f'Fehler beim Laden {url}: {e}')
+                break
+            links = extract_item_links_from_month_page(html)
+            if not links:
+                break
+            logging.info(f"{len(links)} mögliche Detail-Links gefunden auf {url}")
+            new_links = 0
+            for link in links:
+                if link in visited:
+                    continue
+                visited.add(link)
+                new_links += 1
+                time.sleep(0.5)
+                try:
+                    d_html = fetch(session, link)
+                except Exception as e:
+                    logging.warning(f"Fehler beim Laden Detailseite {link}: {e}")
+                    continue
+                meta = parse_detail_page(d_html)
+                meta["url"] = link
+                title = meta.get("title") or link
+                py = meta.get("production_year")
+                rdate = meta.get("release_date")
+                detected_formats = meta.get("detected_formats", [])
+
+                # Category filter: if --category is specified, check if the item matches
+                if args.category:
+                    cat_slug = args.category.strip().lower()
+                    # For 4K UHD: skip items detected as series (unless also detected as 4K)
+                    if cat_slug == "4k-uhd":
+                        if "serien" in detected_formats and "4k-uhd" not in detected_formats:
+                            logging.info(f'Skipping (Serie, not 4K): {title} | formats={detected_formats}')
+                            continue
+                    # For serien: skip items that are clearly only 4K/films (no serie indicator)
+                    elif cat_slug == "serien":
+                        if detected_formats and "serien" not in detected_formats:
+                            logging.info(f'Skipping (not Serie): {title} | formats={detected_formats}')
+                            continue
+                    # For other categories: skip if detected formats don't include the category
+                    # (only when formats were actually detected, to avoid false negatives)
+                    elif detected_formats and cat_slug not in detected_formats:
+                        # Also check the detail page URL for the category slug
+                        if f"/{cat_slug}/" not in link.lower():
+                            logging.info(f'Skipping (wrong category {cat_slug}): {title} | formats={detected_formats}')
+                            continue
+
+                # determine whether to include this candidate based on filters:
+                include_candidate = False
+                # parse release-years argument into list if provided
+                release_years = None
+                if args.release_years:
+                    try:
+                        release_years = [int(x.strip()) for x in args.release_years.split(',') if x.strip()]
+                    except Exception:
+                        release_years = None
+
+                # Determine if the user explicitly passed --year on the command line (avoid treating default as intent)
+                import sys as _sys
+                has_year_arg = any(a.startswith('--year') for a in _sys.argv[1:])
+
+                # Active production filter: user explicitly supplied --year OR used --only-production,
+                # unless ignore-production was requested.
+                if getattr(args, 'ignore_production', False):
+                    prod_filter_active = False
+                else:
+                    prod_filter_active = has_year_arg or args.only_production
+                
+                # Debug logging to understand filtering decisions
+                logging.debug(f"Filter state for '{title}': has_year_arg={has_year_arg}, only_production={args.only_production}, ignore_production={getattr(args, 'ignore_production', False)}, prod_filter_active={prod_filter_active}")
+
+                # Evaluate individual filter predicates (they are ANDed)
+                #  - release predicate: if --release-years provided, require rdate year in that list; otherwise pass
+                if release_years is None:
+                    pass_release = True
+                else:
+                    pass_release = bool(rdate and getattr(rdate, 'year', None) in release_years)
+
+                #  - production predicate: if production filter active, require production_year in production_years list; otherwise pass
+                if not prod_filter_active:
+                    pass_production = True
+                else:
+                    pass_production = (py is not None and py in production_years)
+                
+                # Debug logging for production filter decision
+                logging.debug(f"Production filter for '{title}': prod_filter_active={prod_filter_active}, py={py}, production_years={production_years}, pass_production={pass_production}")
+
+                include_candidate = bool(pass_release and pass_production)
+
+                if include_candidate:
+                    found.append((title, rdate, link))
+                    # Deduplicate similar titles: collect candidates by normalized base title
+                    def normalize_title(t: str) -> str:
+                        """Stronger normalization for dedup: strip parentheticals, edition tokens, covers,
+                        and common format words like 4K/UHD/Blu-ray/Steelbook/Mediabook, then sanitize.
+                        """
+                        if not t:
+                            return ""
+                        s = t.lower()
+                        # normalize German umlauts to ascii-ish equivalents
+                        s = s.replace('ä', 'ae').replace('ö', 'oe').replace('ü', 'ue').replace('ß', 'ss')
+
+                        # remove parenthetical and bracketed parts (e.g. (Cover A), (4K UHD + Blu-ray))
+                        s = re.sub(r"\([^)]*\)", ' ', s)
+                        s = re.sub(r"\[[^]]*\]", ' ', s)
+
+                        # remove known edition/format tokens
+                        tokens = [
+                            'limited', 'steelbook', 'mediabook', 'wattierte', 'amaray', 'cover', 'edition',
+                            '4k', 'uhd', 'blu-ray', 'blu ray', 'soundtrack', 'cd', '2 blu-ray', '2 bluray', '\\+',
+                            'deluxe', 'collector', 'exclusive', 'special', 'mediabook', 'mediabook edition'
+                        ]
+                        for tok in tokens:
+                            # escape token for regex when needed; use real word-boundary \b
+                            pat = r'\b' + re.escape(tok) + r'\b'
+                            s = re.sub(pat, ' ', s)
+
+                        # remove numeric-k tokens like '4k', '8k'
+                        s = re.sub(r'\b\d+k\b', ' ', s)
+                        # normalize common blu-ray variants
+                        s = re.sub(r'\bblu[\s-]?ray\b', ' ', s)
+
+                        # remove any remaining non-alphanumeric (allow - and space)
+                        s = re.sub(r'[^a-z0-9\-\s]', ' ', s)
+                        # collapse whitespace and dashes
+                        s = re.sub(r'[-\s]+', ' ', s)
+                        s = s.strip()
+                        return s
+
+                    key = normalize_title(title)
+                    # candidate selection: prefer entries with release_date; if both have dates keep earliest; else prefer longer title
+                    existing = candidates.get(key)
+                    if existing is None:
+                        candidates[key] = { 'title': title, 'release_date': rdate, 'url': link }
+                        logging.info(f'Candidate added for key "{key}": {title} -> {rdate} (prod={py})')
+                    else:
+                        ex_date = existing.get('release_date')
+                        # prefer the one with a date
+                        if ex_date and not rdate:
+                            logging.debug(f'Keep existing candidate (has date) for "{key}": {existing["title"]}')
+                        elif rdate and not ex_date:
+                            candidates[key] = { 'title': title, 'release_date': rdate, 'url': link }
+                            logging.info(f'Replaced candidate for "{key}" with dated entry: {title} -> {rdate} (prod={py})')
+                        elif rdate and ex_date:
+                            # both have dates: keep earliest
+                            try:
+                                if rdate < ex_date:
+                                    candidates[key] = { 'title': title, 'release_date': rdate, 'url': link }
+                                    logging.info(f'Replaced candidate for "{key}" with earlier date: {title} -> {rdate}')
+                                elif rdate > ex_date:
+                                    logging.debug(f'Existing candidate for "{key}" has earlier date: {existing["title"]} -> {ex_date}')
+                                else:
+                                    # same date: prefer the non-special/standard edition when possible
+                                    edition_tokens = ['steelbook', 'mediabook', 'limited', 'wattierte', 'amaray', 'collector']
+                                    new_has = any(tok in (title or '').lower() for tok in edition_tokens)
+                                    ex_has = any(tok in (existing.get('title') or '').lower() for tok in edition_tokens)
+                                    if ex_has and not new_has:
+                                        # existing is special, new is standard -> prefer new (standard)
+                                        candidates[key] = { 'title': title, 'release_date': rdate, 'url': link }
+                                        logging.info(f'Replaced special candidate for "{key}" with standard: {title} -> {rdate} (prod={py})')
+                                    elif new_has and not ex_has:
+                                        # new is special while existing is standard -> keep existing (prefer standard)
+                                        logging.info(f'Keeping existing standard candidate for "{key}": {existing["title"]}')
+                                    else:
+                                        # fallback: keep the shorter title (prefer concise)
+                                        if len(title) < len(existing.get('title','')):
+                                            candidates[key] = { 'title': title, 'release_date': rdate, 'url': link }
+                                            logging.info(f'Replaced candidate for "{key}" with shorter title: {title} (prod={py})')
+                                        else:
+                                            logging.debug(f'Keep existing candidate for "{key}": {existing["title"]}')
+                            except Exception:
+                                logging.debug(f'Could not compare dates for key "{key}"')
+                        else:
+                            # neither have dates: prefer longer (more descriptive) title
+                            if len(title) > len(existing.get('title','')):
+                                candidates[key] = { 'title': title, 'release_date': rdate, 'url': link }
+                                logging.info(f'Replaced undated candidate for "{key}" with longer title: {title}')
+                            else:
+                                logging.debug(f'Keep existing undated candidate for "{key}": {existing["title"]}')
+                else:
+                    # Log why this candidate was skipped (release / production predicates)
+                    try:
+                        logging.info(f'Skipping: {title} | release_ok={pass_release} production_ok={pass_production} prod={py} rdate={rdate}')
+                    except Exception:
+                        logging.info(f'Skipping: {title} | prod={py} rdate={rdate}')
+
+            if new_links == 0 or page >= MAX_PAGES:
+                break
+            page += 1
+
+    # Use first production year for filename generation
+    outname = args.out.replace('YYYY', str(production_years[0])).replace('MM', 'year')
+    # After crawling, build calendar events from chosen candidates (deduplicated)
+    for key, cand in candidates.items():
+        title = cand.get('title')
+        rdate = cand.get('release_date')
+        link = cand.get('url')
+        if rdate:
+            ev = Event()
+            ev.add('summary', title)
+            ev.add('dtstamp', datetime.now(timezone.utc))
+            ev.add('dtstart', rdate)
+            ev.add('description', f"Quelle: {link}")
+            ev['uid'] = f"{abs(hash(link))}@bluray-disc.de"
+            cal.add_component(ev)
+            logging.info(f'Added event: {title} -> {rdate}')
+        else:
+            # still include undated productions as informational entries (no DTSTART)
+            ev = Event()
+            ev.add('summary', title)
+            ev.add('dtstamp', datetime.now(timezone.utc))
+            ev.add('description', f"Quelle: {link}")
+            ev['uid'] = f"{abs(hash(link))}@bluray-disc.de"
+            cal.add_component(ev)
+            logging.info(f'Added (no date) production {production_years}: {title} ({link})')
+
+    with open(outname, 'wb') as f:
+        f.write(cal.to_ical())
+    logging.info(f'Fertig. {len(candidates)} Einträge (dedupliziert) gefunden. ICS erzeugt: {outname}')
+    for key, cand in candidates.items():
+        print('-', cand.get('title'), '|', cand.get('release_date'), '|', cand.get('url'))
+
+if __name__ == "__main__":
+    main()
