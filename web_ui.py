@@ -295,6 +295,54 @@ HTML_TEMPLATE = r"""
   .log-output .log-error { color: var(--error); }
   .log-output .log-success { color: var(--success); }
 
+  /* Preview table */
+  .preview-section { display: none; margin-top: 16px; }
+  .preview-section.visible { display: block; }
+  .preview-toolbar {
+    display: flex; align-items: center; gap: 10px; margin-bottom: 10px; flex-wrap: wrap;
+  }
+  .preview-toolbar .count { color: var(--text-muted); font-size: 0.85rem; margin-left: auto; }
+  .preview-btn {
+    padding: 6px 14px; border: 1px solid var(--border); border-radius: 6px;
+    background: var(--surface2); color: var(--text-muted); cursor: pointer;
+    font-size: 0.78rem; font-weight: 600; transition: all 0.15s;
+  }
+  .preview-btn:hover { border-color: var(--accent); color: var(--accent); }
+  .preview-btn.primary {
+    background: var(--accent); color: #fff; border-color: var(--accent);
+  }
+  .preview-btn.primary:hover { background: var(--accent-hover); }
+  .preview-table-wrap {
+    max-height: 480px; overflow-y: auto; border: 1px solid var(--border);
+    border-radius: 8px; background: #0d0f14;
+  }
+  .preview-table {
+    width: 100%; border-collapse: collapse; font-size: 0.82rem;
+  }
+  .preview-table th {
+    position: sticky; top: 0; background: var(--surface2);
+    padding: 8px 10px; text-align: left; font-size: 0.75rem;
+    text-transform: uppercase; letter-spacing: 0.04em; color: var(--text-muted);
+    border-bottom: 1px solid var(--border); z-index: 2;
+  }
+  .preview-table td {
+    padding: 7px 10px; border-bottom: 1px solid var(--border);
+    color: var(--text); vertical-align: middle;
+  }
+  .preview-table tr:hover td { background: rgba(79,140,255,0.05); }
+  .preview-table tr.unchecked td { opacity: 0.4; }
+  .preview-table input[type="checkbox"] {
+    width: 16px; height: 16px; accent-color: var(--accent); cursor: pointer;
+  }
+  .preview-table .col-cb { width: 36px; text-align: center; }
+  .preview-table .col-date { width: 100px; white-space: nowrap; }
+  .preview-table .col-year { width: 60px; text-align: center; }
+  .preview-table .col-cat { width: 90px; font-size: 0.75rem; color: var(--text-muted); }
+  .preview-table .title-link {
+    color: var(--accent); text-decoration: none;
+  }
+  .preview-table .title-link:hover { text-decoration: underline; }
+
   .download-row { display: none; margin-top: 14px; gap: 10px; flex-wrap: wrap; }
   .download-row.visible { display: flex; }
   .download-btn {
@@ -453,6 +501,26 @@ HTML_TEMPLATE = r"""
     </div>
     <div class="log-output" id="log-output"><span class="log-info">Bereit. Wähle Einstellungen und klicke "Scraping starten".</span>
 </div>
+    <div class="preview-section" id="preview-section">
+      <div class="preview-toolbar">
+        <button class="preview-btn" onclick="selectAllPreview(true)">Alle</button>
+        <button class="preview-btn" onclick="selectAllPreview(false)">Keine</button>
+        <span class="count" id="preview-count"></span>
+        <button class="preview-btn primary" onclick="generateICS()">ICS erstellen</button>
+      </div>
+      <div class="preview-table-wrap">
+        <table class="preview-table">
+          <thead><tr>
+            <th class="col-cb"><input type="checkbox" id="preview-select-all" checked onchange="selectAllPreview(this.checked)"></th>
+            <th>Titel</th>
+            <th class="col-date">Release</th>
+            <th class="col-year">Prod.</th>
+            <th class="col-cat">Kategorie</th>
+          </tr></thead>
+          <tbody id="preview-body"></tbody>
+        </table>
+      </div>
+    </div>
     <div class="download-row" id="download-row"></div>
   </div>
 
@@ -609,6 +677,7 @@ function startScraping() {
   const progressBar = document.getElementById("progress-bar");
   const badge = document.getElementById("status-badge");
   const dlRow = document.getElementById("download-row");
+  const previewSection = document.getElementById("preview-section");
 
   logOutput.innerHTML = "";
   progressBar.style.width = "0%";
@@ -617,6 +686,8 @@ function startScraping() {
   badge.textContent = "Läuft...";
   dlRow.classList.remove("visible");
   dlRow.innerHTML = "";
+  previewSection.classList.remove("visible");
+  window._previewItems = [];
 
   fetch("/start", {
     method: "POST",
@@ -636,6 +707,14 @@ function startScraping() {
         appendLog(msg.text, msg.level || "info");
       } else if (msg.type === "progress") {
         progressBar.style.width = msg.percent + "%";
+      } else if (msg.type === "preview") {
+        es.close();
+        badge.className = "status-badge status-done";
+        badge.textContent = "Vorschau";
+        progressBar.style.width = "100%";
+        btn.disabled = false;
+        btn.textContent = "Scraping starten";
+        showPreview(msg.items || []);
       } else if (msg.type === "done") {
         es.close();
         badge.className = "status-badge status-done";
@@ -683,6 +762,101 @@ function appendLog(text, level) {
   span.textContent = text + "\n";
   el.appendChild(span);
   el.scrollTop = el.scrollHeight;
+}
+
+// ---- Preview table logic ----
+function showPreview(items) {
+  window._previewItems = items;
+  const body = document.getElementById("preview-body");
+  body.innerHTML = "";
+  items.forEach((item, idx) => {
+    const tr = document.createElement("tr");
+    const dateStr = item.release_date || "—";
+    const prodStr = item.production_year || "—";
+    const catStr = item.category || "";
+    tr.innerHTML =
+      '<td class="col-cb"><input type="checkbox" checked data-idx="' + idx + '" onchange="onPreviewCheck(this)"></td>' +
+      '<td><a class="title-link" href="' + (item.url || '#') + '" target="_blank" rel="noopener">' + escHtml(item.title || "Unbekannt") + '</a></td>' +
+      '<td class="col-date">' + dateStr + '</td>' +
+      '<td class="col-year">' + prodStr + '</td>' +
+      '<td class="col-cat">' + escHtml(catStr) + '</td>';
+    body.appendChild(tr);
+  });
+  document.getElementById("preview-select-all").checked = true;
+  updatePreviewCount();
+  document.getElementById("preview-section").classList.add("visible");
+}
+
+function escHtml(s) {
+  const d = document.createElement("div");
+  d.textContent = s;
+  return d.innerHTML;
+}
+
+function onPreviewCheck(cb) {
+  const tr = cb.closest("tr");
+  if (cb.checked) tr.classList.remove("unchecked");
+  else tr.classList.add("unchecked");
+  updatePreviewCount();
+}
+
+function selectAllPreview(checked) {
+  document.querySelectorAll("#preview-body input[type=checkbox]").forEach(cb => {
+    cb.checked = checked;
+    const tr = cb.closest("tr");
+    if (checked) tr.classList.remove("unchecked");
+    else tr.classList.add("unchecked");
+  });
+  document.getElementById("preview-select-all").checked = checked;
+  updatePreviewCount();
+}
+
+function updatePreviewCount() {
+  const total = document.querySelectorAll("#preview-body input[type=checkbox]").length;
+  const checked = document.querySelectorAll("#preview-body input[type=checkbox]:checked").length;
+  document.getElementById("preview-count").textContent = checked + " / " + total + " ausgewählt";
+}
+
+function generateICS() {
+  const checkboxes = document.querySelectorAll("#preview-body input[type=checkbox]:checked");
+  const selected = [];
+  checkboxes.forEach(cb => {
+    const idx = parseInt(cb.dataset.idx, 10);
+    if (window._previewItems && window._previewItems[idx]) {
+      selected.push(window._previewItems[idx]);
+    }
+  });
+  if (selected.length === 0) {
+    alert("Bitte mindestens einen Eintrag auswählen!");
+    return;
+  }
+  const outputPattern = document.getElementById("output_pattern").value.trim() || "bluray_{year}_{months}.ics";
+  appendLog("Erstelle ICS mit " + selected.length + " Einträgen...", "info");
+
+  fetch("/generate-ics", {
+    method: "POST",
+    headers: {"Content-Type": "application/json"},
+    body: JSON.stringify({items: selected, output_pattern: outputPattern}),
+  }).then(r => r.json()).then(d => {
+    if (d.ok) {
+      appendLog("ICS erstellt: " + d.file + " (" + d.count + " Einträge)", "success");
+      const badge = document.getElementById("status-badge");
+      badge.className = "status-badge status-done";
+      badge.textContent = "Fertig";
+      const dlRow = document.getElementById("download-row");
+      dlRow.innerHTML = "";
+      const a = document.createElement("a");
+      a.className = "download-btn";
+      a.href = "/download/" + encodeURIComponent(d.file);
+      a.innerHTML = '<svg width="18" height="18" fill="none" stroke="currentColor" stroke-width="2" viewBox="0 0 24 24"><path d="M21 15v4a2 2 0 01-2 2H5a2 2 0 01-2-2v-4M7 10l5 5 5-5M12 15V3"/></svg> ' + d.file;
+      dlRow.appendChild(a);
+      dlRow.classList.add("visible");
+    } else {
+      appendLog("Fehler: " + (d.error || "unbekannt"), "error");
+    }
+  }).catch(err => {
+    appendLog("Netzwerkfehler: " + err, "error");
+  });
 }
 </script>
 </body>
@@ -740,7 +914,7 @@ def stream(job_id):
                 yield "data: {}\n\n"
                 continue
             yield f"data: {json.dumps(msg, ensure_ascii=False)}\n\n"
-            if msg.get("type") in ("done", "error"):
+            if msg.get("type") in ("done", "error", "preview"):
                 break
 
     return Response(generate(), mimetype="text/event-stream",
@@ -780,33 +954,12 @@ def run_scraper(job_id, data):
 
         total_steps = len(year_list) * len(cat_list)
         step = 0
-        output_files = []
+        all_preview_items = []
 
         for y in year_list:
             for cat in cat_list:
                 tpl_url = f"https://bluray-disc.de/{cat}/kalender?id={{year}}-{{month:02d}}"
                 prod_arg = production_years if production_years else (release_years if release_years else y)
-
-                months_token = months.replace(",", "-") if months else "all"
-                release_slug = release_years.replace(",", "-") if release_years else "ALL"
-
-                out_name = output_pattern
-                out_name = out_name.replace("{year}", y)
-                out_name = out_name.replace("{months}", months_token)
-                out_name = out_name.replace("{release_years}", release_slug)
-                out_name = out_name.replace("{slug}", cat)
-                if not out_name.endswith(".ics"):
-                    out_name += ".ics"
-
-                # Append disambiguating parts if not in pattern
-                base, ext = os.path.splitext(out_name)
-                append_parts = []
-                if "{slug}" not in output_pattern:
-                    append_parts.append(cat)
-                if "{release_years}" not in output_pattern and release_years:
-                    append_parts.append(release_slug)
-                if append_parts:
-                    out_name = f"{base}_{'_'.join(append_parts)}{ext}"
 
                 cat_label = CATEGORIES.get(cat, cat)
                 cmd = [sys.executable, "-u", str(BUNDLE_DIR / "scraper.py")]
@@ -820,10 +973,10 @@ def run_scraper(job_id, data):
                 if ignore_production:
                     cmd += ["--ignore-production"]
                 cmd += ["--category", cat]
-                cmd += ["--out", out_name]
+                cmd += ["--preview"]
+                cmd += ["--out", "preview_temp.ics"]
 
                 q.put({"type": "log", "text": f"--- Starte: Jahr {y}, Kategorie: {cat_label} ---", "level": "info"})
-                q.put({"type": "log", "text": f"Ausgabedatei: {out_name}", "level": "info"})
 
                 proc = subprocess.Popen(
                     cmd,
@@ -839,12 +992,23 @@ def run_scraper(job_id, data):
                     line = line.rstrip("\n\r")
                     if not line:
                         continue
+                    # Intercept PREVIEW_JSON lines
+                    if line.startswith("PREVIEW_JSON:"):
+                        json_str = line[len("PREVIEW_JSON:"):]
+                        try:
+                            preview_data = json.loads(json_str)
+                            for item in preview_data.get("items", []):
+                                item["category"] = cat_label
+                            all_preview_items.extend(preview_data.get("items", []))
+                        except Exception:
+                            pass
+                        continue
                     level = "info"
                     if "WARNING" in line or "Fehler" in line:
                         level = "warn"
                     elif "ERROR" in line:
                         level = "error"
-                    elif "Fertig." in line or "Added event" in line:
+                    elif "Vorschau:" in line or "Candidate added" in line:
                         level = "success"
                     q.put({"type": "log", "text": line, "level": level})
 
@@ -856,17 +1020,69 @@ def run_scraper(job_id, data):
                 if proc.returncode != 0:
                     q.put({"type": "log", "text": f"Scraper beendet mit Exit-Code {proc.returncode}", "level": "error"})
 
-                output_files.append(out_name)
+        # Sort all items by release_date
+        all_preview_items.sort(key=lambda x: x.get("release_date") or "9999-99-99")
 
-        job["status"] = "done"
-        job["output_file"] = output_files[-1] if output_files else None
-        q.put({"type": "log", "text": f"Alle Aufgaben abgeschlossen! ({len(output_files)} Datei(en) erzeugt)", "level": "success"})
-        q.put({"type": "done", "files": output_files})
+        # Store items in job for later ICS generation
+        job["preview_items"] = all_preview_items
+        job["form_data"] = data
+        job["status"] = "preview"
+        q.put({"type": "log", "text": f"Scraping abgeschlossen! {len(all_preview_items)} Eintraege gefunden.", "level": "success"})
+        q.put({"type": "preview", "items": all_preview_items})
 
     except Exception as e:
         job["status"] = "error"
         q.put({"type": "log", "text": f"Fehler: {e}", "level": "error"})
         q.put({"type": "error", "text": str(e)})
+
+
+@app.route("/generate-ics", methods=["POST"])
+def generate_ics():
+    """Generate an ICS file from user-selected preview items."""
+    from icalendar import Calendar, Event
+    data = request.get_json(force=True)
+    items = data.get("items", [])
+    output_pattern = data.get("output_pattern", "bluray_selected.ics")
+
+    if not items:
+        return jsonify({"ok": False, "error": "Keine Eintraege ausgewaehlt"}), 400
+
+    cal = Calendar()
+    cal.add('prodid', '-//BlurayDisc Scraper//de//')
+    cal.add('version', '2.0')
+
+    for item in items:
+        ev = Event()
+        ev.add('summary', item.get('title', 'Unbekannt'))
+        ev.add('dtstamp', datetime.now())
+        if item.get('release_date'):
+            try:
+                from datetime import date
+                rd = date.fromisoformat(item['release_date'])
+                ev.add('dtstart', rd)
+            except Exception:
+                pass
+        url = item.get('url', '')
+        ev.add('description', f"Quelle: {url}")
+        ev['uid'] = f"{abs(hash(url))}@bluray-disc.de"
+        cal.add_component(ev)
+
+    # Build output filename
+    out_name = output_pattern
+    if not out_name.endswith(".ics"):
+        out_name += ".ics"
+    # Simple replacements
+    out_name = out_name.replace("{year}", str(datetime.now().year))
+    out_name = out_name.replace("{months}", "all")
+    out_name = out_name.replace("{release_years}", "ALL")
+    out_name = out_name.replace("{slug}", "selected")
+    safe_name = Path(out_name).name
+
+    out_path = BASE_DIR / safe_name
+    with open(out_path, 'wb') as f:
+        f.write(cal.to_ical())
+
+    return jsonify({"ok": True, "file": safe_name, "count": len(items)})
 
 
 # ---------------------------------------------------------------------------

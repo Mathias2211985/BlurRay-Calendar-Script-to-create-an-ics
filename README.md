@@ -36,13 +36,6 @@ Oder per Doppelklick: `start_web.bat`
 python scraper.py --calendar-template "https://bluray-disc.de/4k-uhd/kalender?id={year}-{month:02d}" --calendar-year 2026 --category 4k-uhd --ignore-production --out bluray_2026_4k.ics
 ```
 
-### Option 4: PowerShell Runner (interaktiv)
-
-```powershell
-.\run_scraper.ps1
-# Oder per Doppelklick: run_scraper_doubleclick.bat
-```
-
 ## Dateien
 
 | Datei | Beschreibung |
@@ -51,10 +44,7 @@ python scraper.py --calendar-template "https://bluray-disc.de/4k-uhd/kalender?id
 | `scraper.py` | Scraper-Kern (CLI) |
 | `build_exe.py` | Build-Script fuer die .exe |
 | `start_web.bat` | Doppelklick-Starter fuer die Web-UI |
-| `run_scraper.ps1` | Interaktiver PowerShell-Runner (CLI) |
-| `run_scraper_doubleclick.bat` | Doppelklick-Starter fuer den PowerShell-Runner |
 | `requirements.txt` | Python-Abhaengigkeiten |
-| `tools/` | Debug- und Hilfsscripts |
 
 ## Web-UI
 
@@ -67,6 +57,7 @@ Die Web-UI bietet:
 - **Produktionsjahr-Filter**: Toggle zum Aktivieren, mit eigener Jahresauswahl
 - **Ausgabedatei**: Konfigurierbares Namensmuster mit Platzhaltern
 - **Live-Log**: Echtzeit-Ausgabe via Server-Sent Events (rechte Spalte)
+- **Vorschau-Tabelle**: alle gefundenen Eintraege mit Checkboxen zur Auswahl vor der ICS-Erstellung
 - **Download**: ICS-Datei direkt im Browser herunterladen
 
 Einstellungen werden automatisch in `config.json` gespeichert.
@@ -111,23 +102,6 @@ python scraper.py --year 2025 --release-years 2026 --calendar-year 2026 --calend
 python scraper.py --release-years 2026 --ignore-production --calendar-template "https://bluray-disc.de/blu-ray-filme/kalender?id={year}-{month:02d}" --calendar-year 2026 --category blu-ray-filme --out alle_2026.ics
 ```
 
-## PowerShell Runner
-
-Der `run_scraper.ps1` fragt interaktiv nach:
-
-1. **Kalender-Jahre** -- welche Kalender-Seiten gecrawlt werden
-2. **Release-Jahre** -- Filter nach Erscheinungsdatum (leer = alle)
-3. **Produktions-Jahre** -- Filter nach Produktionsjahr (leer = wie Release)
-4. **Produktionsjahr-Pruefung** -- ob der Produktionsjahr-Filter aktiv sein soll
-
-```powershell
-# Interaktiv:
-.\run_scraper.ps1
-
-# Non-interactive:
-powershell -ExecutionPolicy Bypass -File .\run_scraper.ps1 -Years '2026' -Months '01,02' -CalendarTemplate '4k-uhd' -ReleaseYears '2026' -IgnoreProduction
-```
-
 ## Verfuegbare Kategorien
 
 | Slug | Beschreibung |
@@ -167,4 +141,3 @@ Enthalten: `requests`, `beautifulsoup4`, `icalendar`, `flask`
 - Duplikate werden anhand normalisierter Titel dedupliziert (Steelbook, Mediabook, etc.)
 - Bei 4K-Suche werden Serien automatisch herausgefiltert (und umgekehrt)
 - Die ICS-Datei kann in jeden gaengigen Kalender importiert werden
-- Wenn PowerShell lokale Skripte blockiert: `powershell -ExecutionPolicy Bypass -File .\run_scraper.ps1`

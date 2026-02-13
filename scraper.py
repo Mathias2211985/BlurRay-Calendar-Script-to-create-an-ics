@@ -281,6 +281,7 @@ def main():
     parser.add_argument('--calendar-template', type=str, default=None, help='Optional URL template for calendar pages, e.g. "https://bluray-disc.de/4k-uhd/kalender?id={year}-{month:02d}"')
     parser.add_argument('--months', type=str, default=None, help='Comma-separated months or range (e.g. "01,02" or "01-03"). If omitted and --calendar-template given, defaults to all 12 months.')
     parser.add_argument('--category', type=str, default=None, help='Category slug (e.g. "4k-uhd", "blu-ray-filme", "serien"). Used to filter detail pages by format.')
+    parser.add_argument('--preview', action='store_true', default=False, help='If set, output a JSON preview of found items instead of writing an ICS file.')
     args = parser.parse_args()
 
     # Interactive prompt for release-years when not provided and running interactively
@@ -489,8 +490,9 @@ def main():
                     key = normalize_title(title)
                     # candidate selection: prefer entries with release_date; if both have dates keep earliest; else prefer longer title
                     existing = candidates.get(key)
+                    new_cand = { 'title': title, 'release_date': rdate, 'url': link, 'production_year': py }
                     if existing is None:
-                        candidates[key] = { 'title': title, 'release_date': rdate, 'url': link }
+                        candidates[key] = new_cand
                         logging.info(f'Candidate added for key "{key}": {title} -> {rdate} (prod={py})')
                     else:
                         ex_date = existing.get('release_date')
@@ -498,13 +500,13 @@ def main():
                         if ex_date and not rdate:
                             logging.debug(f'Keep existing candidate (has date) for "{key}": {existing["title"]}')
                         elif rdate and not ex_date:
-                            candidates[key] = { 'title': title, 'release_date': rdate, 'url': link }
+                            candidates[key] = new_cand
                             logging.info(f'Replaced candidate for "{key}" with dated entry: {title} -> {rdate} (prod={py})')
                         elif rdate and ex_date:
                             # both have dates: keep earliest
                             try:
                                 if rdate < ex_date:
-                                    candidates[key] = { 'title': title, 'release_date': rdate, 'url': link }
+                                    candidates[key] = new_cand
                                     logging.info(f'Replaced candidate for "{key}" with earlier date: {title} -> {rdate}')
                                 elif rdate > ex_date:
                                     logging.debug(f'Existing candidate for "{key}" has earlier date: {existing["title"]} -> {ex_date}')
@@ -514,25 +516,21 @@ def main():
                                     new_has = any(tok in (title or '').lower() for tok in edition_tokens)
                                     ex_has = any(tok in (existing.get('title') or '').lower() for tok in edition_tokens)
                                     if ex_has and not new_has:
-                                        # existing is special, new is standard -> prefer new (standard)
-                                        candidates[key] = { 'title': title, 'release_date': rdate, 'url': link }
+                                        candidates[key] = new_cand
                                         logging.info(f'Replaced special candidate for "{key}" with standard: {title} -> {rdate} (prod={py})')
                                     elif new_has and not ex_has:
-                                        # new is special while existing is standard -> keep existing (prefer standard)
                                         logging.info(f'Keeping existing standard candidate for "{key}": {existing["title"]}')
                                     else:
-                                        # fallback: keep the shorter title (prefer concise)
                                         if len(title) < len(existing.get('title','')):
-                                            candidates[key] = { 'title': title, 'release_date': rdate, 'url': link }
+                                            candidates[key] = new_cand
                                             logging.info(f'Replaced candidate for "{key}" with shorter title: {title} (prod={py})')
                                         else:
                                             logging.debug(f'Keep existing candidate for "{key}": {existing["title"]}')
                             except Exception:
                                 logging.debug(f'Could not compare dates for key "{key}"')
                         else:
-                            # neither have dates: prefer longer (more descriptive) title
                             if len(title) > len(existing.get('title','')):
-                                candidates[key] = { 'title': title, 'release_date': rdate, 'url': link }
+                                candidates[key] = new_cand
                                 logging.info(f'Replaced undated candidate for "{key}" with longer title: {title}')
                             else:
                                 logging.debug(f'Keep existing undated candidate for "{key}": {existing["title"]}')
@@ -549,6 +547,25 @@ def main():
 
     # Use first production year for filename generation
     outname = args.out.replace('YYYY', str(production_years[0])).replace('MM', 'year')
+
+    # Preview mode: output JSON instead of writing ICS
+    if args.preview:
+        import json
+        items = []
+        for key, cand in candidates.items():
+            rd = cand.get('release_date')
+            items.append({
+                'title': cand.get('title'),
+                'release_date': rd.isoformat() if rd else None,
+                'url': cand.get('url'),
+                'production_year': cand.get('production_year'),
+            })
+        # Sort by release_date (None last)
+        items.sort(key=lambda x: x['release_date'] or '9999-99-99')
+        print(f"PREVIEW_JSON:{json.dumps({'items': items}, ensure_ascii=False)}")
+        logging.info(f'Vorschau: {len(items)} Eintraege gefunden (dedupliziert).')
+        return
+
     # After crawling, build calendar events from chosen candidates (deduplicated)
     for key, cand in candidates.items():
         title = cand.get('title')
