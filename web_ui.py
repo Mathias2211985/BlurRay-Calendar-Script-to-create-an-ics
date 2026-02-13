@@ -1047,7 +1047,11 @@ def run_scraper(job_id, data):
                 prod_arg = production_years if production_years else (release_years if release_years else y)
 
                 cat_label = CATEGORIES.get(cat, cat)
-                cmd = [sys.executable, "-u", str(BUNDLE_DIR / "scraper.py")]
+                if getattr(sys, 'frozen', False):
+                    # Frozen exe: call ourselves with --run-scraper flag
+                    cmd = [sys.executable, "--run-scraper"]
+                else:
+                    cmd = [sys.executable, "-u", str(BUNDLE_DIR / "scraper.py")]
                 cmd += ["--year", prod_arg]
                 cmd += ["--calendar-year", y]
                 cmd += ["--calendar-template", tpl_url]
@@ -1175,6 +1179,16 @@ def generate_ics():
 # ---------------------------------------------------------------------------
 
 if __name__ == "__main__":
+    # When running as frozen exe, subprocess calls use sys.executable which
+    # points back to this exe.  The "--run-scraper" flag lets us forward the
+    # call to scraper.py's main() instead of starting the web UI again.
+    if getattr(sys, 'frozen', False) and len(sys.argv) > 1 and sys.argv[1] == "--run-scraper":
+        # Strip the --run-scraper flag and forward remaining args to scraper
+        sys.argv = [sys.argv[0]] + sys.argv[2:]
+        import scraper  # bundled by PyInstaller
+        scraper.main()
+        sys.exit(0)
+
     port = int(os.environ.get("PORT", 5000))
     print(f"BluRay Calendar Scraper Web-UI startet auf http://localhost:{port}")
     threading.Timer(1.5, lambda: webbrowser.open(f"http://localhost:{port}")).start()
