@@ -18,6 +18,16 @@ from datetime import datetime
 
 from flask import Flask, render_template_string, request, jsonify, Response, send_from_directory
 
+# Ensure PyInstaller bundles scraper dependencies (imported here so
+# PyInstaller sees them during analysis; the actual scraper module is
+# imported lazily in _run_scraper_inprocess).
+try:
+    import requests  # noqa: F401
+    import bs4  # noqa: F401
+    import icalendar  # noqa: F401
+except ImportError as _e:
+    print(f"WARNING: Fehlende Abhaengigkeit: {_e}")
+
 app = Flask(__name__)
 
 # Directory where this script lives (and where scraper.py / output files are)
@@ -835,14 +845,17 @@ function normalizeTitle(t) {
   s = s.replace(/ä/g,'ae').replace(/ö/g,'oe').replace(/ü/g,'ue').replace(/ß/g,'ss');
   // remove parenthetical and bracketed parts
   s = s.replace(/\([^)]*\)/g, ' ').replace(/\[[^\]]*\]/g, ' ');
+  // remove blu-ray/format variants first (order matters: multi-word before single)
+  s = s.replace(/\b\d+\s*blu[\s-]?rays?\b/g, ' ');  // "2 Blu-ray"
+  s = s.replace(/\bblu[\s-]?ray\s*disc\b/g, ' ');
+  s = s.replace(/\bblu[\s-]?rays?\b/g, ' ');
+  s = s.replace(/\b\d+k\b/g, ' ');  // "4k", "8k"
+  s = s.replace(/\buhd\b/g, ' ');
+  s = s.replace(/\bdvd\b/g, ' ');
   // remove known edition/format tokens
   var tokens = ['limited','steelbook','mediabook','wattierte','amaray','cover','edition',
-    'uhd','blu-ray','blu ray','soundtrack','cd','deluxe','collector','exclusive','special'];
+    'soundtrack','cd','deluxe','collector','exclusive','special','uncut','extended','directors cut'];
   tokens.forEach(function(tok) { s = s.replace(new RegExp('\\b' + tok.replace(/[.*+?^${}()|[\]\\]/g,'\\$&') + '\\b','g'), ' '); });
-  // remove numeric-k tokens
-  s = s.replace(/\b\d+k\b/g, ' ');
-  // normalize blu-ray variants
-  s = s.replace(/\bblu[\s-]?ray\b/g, ' ');
   // remove non-alphanumeric (keep - and space)
   s = s.replace(/[^a-z0-9\-\s]/g, ' ');
   // collapse whitespace
@@ -1016,6 +1029,84 @@ def download(filename):
 # Scraper runner (in background thread)
 # ---------------------------------------------------------------------------
 
+def _process_scraper_line(line, q, cat_label, all_preview_items):
+    """Process a single line of scraper output (shared by subprocess and in-process modes)."""
+    line = line.rstrip("\n\r")
+    if not line:
+        return
+    # Intercept PREVIEW_JSON lines
+    if line.startswith("PREVIEW_JSON:"):
+        json_str = line[len("PREVIEW_JSON:"):]
+        try:
+            preview_data = json.loads(json_str)
+            for item in preview_data.get("items", []):
+                item["category"] = cat_label
+            all_preview_items.extend(preview_data.get("items", []))
+        except Exception:
+            pass
+        return
+    level = "info"
+    if "WARNING" in line or "Fehler" in line:
+        level = "warn"
+    elif "ERROR" in line:
+        level = "error"
+    elif "Vorschau:" in line or "Candidate added" in line:
+        level = "success"
+    q.put({"type": "log", "text": line, "level": level})
+
+
+class _LineWriter:
+    """A file-like object that forwards each written line to the job queue in real-time."""
+    def __init__(self, q, cat_label, all_preview_items):
+        self._q = q
+        self._cat_label = cat_label
+        self._items = all_preview_items
+        self._buf = ""
+
+    def write(self, text):
+        self._buf += text
+        while "\n" in self._buf:
+            line, self._buf = self._buf.split("\n", 1)
+            _process_scraper_line(line, self._q, self._cat_label, self._items)
+
+    def flush(self):
+        if self._buf.strip():
+            _process_scraper_line(self._buf, self._q, self._cat_label, self._items)
+            self._buf = ""
+
+
+def _run_scraper_inprocess(args_list, q, cat_label, all_preview_items):
+    """Run scraper.main() directly in-process (for frozen exe).
+    Streams output to the job queue in real-time."""
+    import contextlib
+
+    # Save and replace sys.argv so argparse inside scraper.main() sees our args
+    orig_argv = sys.argv
+    sys.argv = ["scraper"] + args_list
+
+    writer = _LineWriter(q, cat_label, all_preview_items)
+    try:
+        import scraper
+        with contextlib.redirect_stdout(writer), contextlib.redirect_stderr(writer):
+            # Also redirect the logging handler to our real-time stream
+            root_logger = logging.getLogger()
+            temp_handler = logging.StreamHandler(writer)
+            temp_handler.setFormatter(logging.Formatter('%(asctime)s %(levelname)s: %(message)s'))
+            orig_handlers = root_logger.handlers[:]
+            root_logger.handlers = [temp_handler]
+            try:
+                scraper.main()
+            finally:
+                root_logger.handlers = orig_handlers
+    except SystemExit:
+        pass  # argparse may call sys.exit
+    except Exception as e:
+        q.put({"type": "log", "text": f"Scraper Fehler: {e}", "level": "error"})
+    finally:
+        sys.argv = orig_argv
+        writer.flush()
+
+
 def run_scraper(job_id, data):
     job = jobs[job_id]
     q = job["queue"]
@@ -1027,7 +1118,6 @@ def run_scraper(job_id, data):
         release_years = data.get("release_years", "")
         production_years = data.get("production_years", "")
         ignore_production = data.get("ignore_production", True)
-        output_pattern = data.get("output_pattern", "bluray_{year}_{months}.ics")
 
         year_list = [y.strip() for y in calendar_years.split(",") if y.strip()]
         if not year_list:
@@ -1040,6 +1130,7 @@ def run_scraper(job_id, data):
         total_steps = len(year_list) * len(cat_list)
         step = 0
         all_preview_items = []
+        is_frozen = getattr(sys, 'frozen', False)
 
         for y in year_list:
             for cat in cat_list:
@@ -1047,70 +1138,100 @@ def run_scraper(job_id, data):
                 prod_arg = production_years if production_years else (release_years if release_years else y)
 
                 cat_label = CATEGORIES.get(cat, cat)
-                if getattr(sys, 'frozen', False):
-                    # Frozen exe: call ourselves with --run-scraper flag
-                    cmd = [sys.executable, "--run-scraper"]
-                else:
-                    cmd = [sys.executable, "-u", str(BUNDLE_DIR / "scraper.py")]
-                cmd += ["--year", prod_arg]
-                cmd += ["--calendar-year", y]
-                cmd += ["--calendar-template", tpl_url]
+
+                # Build scraper arguments
+                scraper_args = ["--year", prod_arg]
+                scraper_args += ["--calendar-year", y]
+                scraper_args += ["--calendar-template", tpl_url]
                 if months:
-                    cmd += ["--months", months]
+                    scraper_args += ["--months", months]
                 if release_years:
-                    cmd += ["--release-years", release_years]
+                    scraper_args += ["--release-years", release_years]
                 if ignore_production:
-                    cmd += ["--ignore-production"]
-                cmd += ["--category", cat]
-                cmd += ["--preview"]
-                cmd += ["--out", "preview_temp.ics"]
+                    scraper_args += ["--ignore-production"]
+                scraper_args += ["--category", cat]
+                scraper_args += ["--preview"]
+                scraper_args += ["--out", "preview_temp.ics"]
 
                 q.put({"type": "log", "text": f"--- Starte: Jahr {y}, Kategorie: {cat_label} ---", "level": "info"})
 
-                proc = subprocess.Popen(
-                    cmd,
-                    stdout=subprocess.PIPE,
-                    stderr=subprocess.STDOUT,
-                    text=True,
-                    encoding="utf-8",
-                    errors="replace",
-                    cwd=str(BASE_DIR),
-                )
+                if is_frozen:
+                    # Frozen exe: run scraper directly in-process
+                    _run_scraper_inprocess(scraper_args, q, cat_label, all_preview_items)
+                else:
+                    # Development: run as subprocess
+                    cmd = [sys.executable, "-u", str(BUNDLE_DIR / "scraper.py")] + scraper_args
 
-                for line in proc.stdout:
-                    line = line.rstrip("\n\r")
-                    if not line:
-                        continue
-                    # Intercept PREVIEW_JSON lines
-                    if line.startswith("PREVIEW_JSON:"):
-                        json_str = line[len("PREVIEW_JSON:"):]
-                        try:
-                            preview_data = json.loads(json_str)
-                            for item in preview_data.get("items", []):
-                                item["category"] = cat_label
-                            all_preview_items.extend(preview_data.get("items", []))
-                        except Exception:
-                            pass
-                        continue
-                    level = "info"
-                    if "WARNING" in line or "Fehler" in line:
-                        level = "warn"
-                    elif "ERROR" in line:
-                        level = "error"
-                    elif "Vorschau:" in line or "Candidate added" in line:
-                        level = "success"
-                    q.put({"type": "log", "text": line, "level": level})
+                    proc = subprocess.Popen(
+                        cmd,
+                        stdout=subprocess.PIPE,
+                        stderr=subprocess.STDOUT,
+                        text=True,
+                        encoding="utf-8",
+                        errors="replace",
+                        cwd=str(BASE_DIR),
+                    )
 
-                proc.wait()
+                    for line in proc.stdout:
+                        _process_scraper_line(line, q, cat_label, all_preview_items)
+
+                    proc.wait()
+                    if proc.returncode != 0:
+                        q.put({"type": "log", "text": f"Scraper beendet mit Exit-Code {proc.returncode}", "level": "error"})
+
                 step += 1
                 percent = int((step / total_steps) * 100)
                 q.put({"type": "progress", "percent": percent})
 
-                if proc.returncode != 0:
-                    q.put({"type": "log", "text": f"Scraper beendet mit Exit-Code {proc.returncode}", "level": "error"})
-
         # Sort all items by release_date
         all_preview_items.sort(key=lambda x: x.get("release_date") or "9999-99-99")
+
+        # Cross-category dedup: keep best version per normalized title
+        import re as _re
+        CAT_PRIO = {"4K UHD": 0, "Blu-ray Filme": 1, "3D Blu-ray": 2, "Serien": 3, "Importe": 4}
+
+        def _norm(t):
+            if not t:
+                return ""
+            s = t.lower()
+            s = s.replace('ä','ae').replace('ö','oe').replace('ü','ue').replace('ß','ss')
+            s = _re.sub(r"\([^)]*\)", ' ', s)
+            s = _re.sub(r"\[[^\]]*\]", ' ', s)
+            s = _re.sub(r'\b\d+\s*blu[\s-]?rays?\b', ' ', s)
+            s = _re.sub(r'\bblu[\s-]?ray\s*disc\b', ' ', s)
+            s = _re.sub(r'\bblu[\s-]?rays?\b', ' ', s)
+            s = _re.sub(r'\b\d+k\b', ' ', s)
+            s = _re.sub(r'\buhd\b', ' ', s)
+            s = _re.sub(r'\bdvd\b', ' ', s)
+            for tok in ['limited','steelbook','mediabook','wattierte','amaray','cover',
+                        'edition','soundtrack','cd','deluxe','collector','exclusive',
+                        'special','uncut','extended','directors cut']:
+                s = _re.sub(r'\b' + _re.escape(tok) + r'\b', ' ', s)
+            s = _re.sub(r'[^a-z0-9\-\s]', ' ', s)
+            s = _re.sub(r'[-\s]+', ' ', s).strip()
+            return s
+
+        seen = {}
+        deduped = []
+        for item in all_preview_items:
+            key = _norm(item.get("title", ""))
+            if not key:
+                deduped.append(item)
+                continue
+            if key not in seen:
+                seen[key] = len(deduped)
+                deduped.append(item)
+            else:
+                # Keep the one with higher category priority (lower number = better)
+                existing = deduped[seen[key]]
+                ex_prio = CAT_PRIO.get(existing.get("category"), 99)
+                new_prio = CAT_PRIO.get(item.get("category"), 99)
+                if new_prio < ex_prio:
+                    deduped[seen[key]] = item
+
+        if len(deduped) < len(all_preview_items):
+            q.put({"type": "log", "text": f"Duplikate entfernt: {len(all_preview_items)} -> {len(deduped)} Eintraege", "level": "info"})
+        all_preview_items = deduped
 
         # Store items in job for later ICS generation
         job["preview_items"] = all_preview_items
@@ -1179,16 +1300,6 @@ def generate_ics():
 # ---------------------------------------------------------------------------
 
 if __name__ == "__main__":
-    # When running as frozen exe, subprocess calls use sys.executable which
-    # points back to this exe.  The "--run-scraper" flag lets us forward the
-    # call to scraper.py's main() instead of starting the web UI again.
-    if getattr(sys, 'frozen', False) and len(sys.argv) > 1 and sys.argv[1] == "--run-scraper":
-        # Strip the --run-scraper flag and forward remaining args to scraper
-        sys.argv = [sys.argv[0]] + sys.argv[2:]
-        import scraper  # bundled by PyInstaller
-        scraper.main()
-        sys.exit(0)
-
     port = int(os.environ.get("PORT", 5000))
     print(f"BluRay Calendar Scraper Web-UI startet auf http://localhost:{port}")
     threading.Timer(1.5, lambda: webbrowser.open(f"http://localhost:{port}")).start()

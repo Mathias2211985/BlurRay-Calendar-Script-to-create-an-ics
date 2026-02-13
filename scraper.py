@@ -73,9 +73,11 @@ def parse_detail_page(html):
     if h1:
         result["title"] = h1.get_text(strip=True)
 
-    # Detect format/category from page content and breadcrumbs
+    # Detect format/category from breadcrumbs and title (NOT sidebar/full page)
     formats = set()
-    # Check breadcrumbs and navigation for category hints
+    title_lower = (result.get("title") or "").lower()
+
+    # Check breadcrumbs only (reliable category indicator)
     for nav in soup.select("nav, .breadcrumb, .breadcrumbs, ol.breadcrumb"):
         nav_text = nav.get_text(" ", strip=True).lower()
         if "4k" in nav_text or "uhd" in nav_text or "ultra hd" in nav_text:
@@ -86,25 +88,15 @@ def parse_detail_page(html):
             formats.add("3d-blu-ray-filme")
         if "import" in nav_text:
             formats.add("blu-ray-importe")
-    # Check links on the page that point to category sections
-    for a in soup.select("a"):
-        href = (a.get("href") or "").lower()
-        if "/4k-uhd/" in href or "/4k-uhd?" in href:
-            formats.add("4k-uhd")
-        if "/serien/" in href or "/serien?" in href:
-            formats.add("serien")
-        if "/3d-blu-ray" in href:
-            formats.add("3d-blu-ray-filme")
-        if "/blu-ray-importe/" in href:
-            formats.add("blu-ray-importe")
-    # Check page text for format keywords
-    page_text_lower = soup.get_text(" ", strip=True).lower()
-    # Look for explicit format labels commonly used on bluray-disc.de
-    if re.search(r"\b4k\s*ultra\s*hd\b", page_text_lower) or re.search(r"\b4k\s*uhd\b", page_text_lower):
-        formats.add("4k-uhd")
-    if re.search(r"\bserie\b|\bstaffel\b|\bseason\b|\bepisode\b", page_text_lower):
+
+    # Check the TITLE for series indicators (Staffel, Season, komplette Serie)
+    if re.search(r"\bstaffel\b|\bseason\b|\bkomplette\s+serie\b", title_lower):
         formats.add("serien")
-    if re.search(r"\b3d\s*blu[\s-]?ray\b", page_text_lower):
+
+    # Check the title for 4K/UHD indicators
+    if re.search(r"\b4k\b|\buhd\b|\bultra\s*hd\b", title_lower):
+        formats.add("4k-uhd")
+    if re.search(r"\b3d\b", title_lower):
         formats.add("3d-blu-ray-filme")
     # Check the URL itself for category hints
     result["detected_formats"] = list(formats)
@@ -318,23 +310,23 @@ def main():
         target_year = production_years[0]  # fallback to first production year
     session = create_session()
 
+    # Parse months helper (used for both page generation and release-date filtering)
+    def parse_months(s):
+        if not s:
+            return list(range(1,13))
+        parts = s.split(',')
+        months = []
+        for p in parts:
+            p = p.strip()
+            if '-' in p:
+                a,b = p.split('-',1)
+                months.extend(range(int(a), int(b)+1))
+            else:
+                months.append(int(p))
+        return sorted(set(months))
+
     # Build pages list: if user provided a calendar-template, expand months from that template
     if args.calendar_template:
-        # parse months
-        def parse_months(s):
-            if not s:
-                return list(range(1,13))
-            parts = s.split(',')
-            months = []
-            for p in parts:
-                p = p.strip()
-                if '-' in p:
-                    a,b = p.split('-',1)
-                    months.extend(range(int(a), int(b)+1))
-                else:
-                    months.append(int(p))
-            return sorted(set(months))
-
         month_nums = parse_months(args.months)
 
         # If the provided calendar_template looks like a full URL (starts with http or contains ://)
@@ -392,6 +384,11 @@ def main():
                         if "serien" in detected_formats and "4k-uhd" not in detected_formats:
                             logging.info(f'Skipping (Serie, not 4K): {title} | formats={detected_formats}')
                             continue
+                    # For blu-ray-filme: skip items that are detected as series
+                    elif cat_slug == "blu-ray-filme":
+                        if "serien" in detected_formats and "blu-ray-filme" not in detected_formats:
+                            logging.info(f'Skipping (Serie, not Film): {title} | formats={detected_formats}')
+                            continue
                     # For serien: skip items that are clearly only 4K/films (no serie indicator)
                     elif cat_slug == "serien":
                         if detected_formats and "serien" not in detected_formats:
@@ -445,7 +442,22 @@ def main():
                 # Debug logging for production filter decision
                 logging.debug(f"Production filter for '{title}': prod_filter_active={prod_filter_active}, py={py}, production_years={production_years}, pass_production={pass_production}")
 
-                include_candidate = bool(pass_release and pass_production)
+                #  - calendar-year + months predicate: if --months was given,
+                #    require the release date to fall within the selected
+                #    calendar year AND selected months.
+                pass_calendar = True
+                if rdate and args.months:
+                    selected_months = parse_months(args.months) if args.months else []
+                    if selected_months:
+                        if rdate.month not in selected_months:
+                            pass_calendar = False
+                            logging.info(f'Skipping (month {rdate.month:02d} not in {selected_months}): {title} | rdate={rdate}')
+                if rdate and target_year:
+                    if rdate.year != target_year:
+                        pass_calendar = False
+                        logging.info(f'Skipping (year {rdate.year} != calendar year {target_year}): {title} | rdate={rdate}')
+
+                include_candidate = bool(pass_release and pass_production and pass_calendar)
 
                 if include_candidate:
                     found.append((title, rdate, link))
@@ -464,21 +476,23 @@ def main():
                         s = re.sub(r"\([^)]*\)", ' ', s)
                         s = re.sub(r"\[[^]]*\]", ' ', s)
 
+                        # remove all blu-ray/format variants first (before token removal)
+                        s = re.sub(r'\b\d+\s*blu[\s-]?rays?\b', ' ', s)  # "2 Blu-ray", "2 Blu-rays"
+                        s = re.sub(r'\bblu[\s-]?ray\s*disc\b', ' ', s)
+                        s = re.sub(r'\bblu[\s-]?rays?\b', ' ', s)
+                        s = re.sub(r'\b\d+k\b', ' ', s)  # "4k", "8k"
+                        s = re.sub(r'\buhd\b', ' ', s)
+                        s = re.sub(r'\bdvd\b', ' ', s)
+
                         # remove known edition/format tokens
                         tokens = [
-                            'limited', 'steelbook', 'mediabook', 'wattierte', 'amaray', 'cover', 'edition',
-                            '4k', 'uhd', 'blu-ray', 'blu ray', 'soundtrack', 'cd', '2 blu-ray', '2 bluray', '\\+',
-                            'deluxe', 'collector', 'exclusive', 'special', 'mediabook', 'mediabook edition'
+                            'limited', 'steelbook', 'mediabook', 'wattierte', 'amaray',
+                            'cover', 'edition', 'soundtrack', 'cd', 'deluxe', 'collector',
+                            'exclusive', 'special', 'uncut', 'extended', 'directors cut',
                         ]
                         for tok in tokens:
-                            # escape token for regex when needed; use real word-boundary \b
                             pat = r'\b' + re.escape(tok) + r'\b'
                             s = re.sub(pat, ' ', s)
-
-                        # remove numeric-k tokens like '4k', '8k'
-                        s = re.sub(r'\b\d+k\b', ' ', s)
-                        # normalize common blu-ray variants
-                        s = re.sub(r'\bblu[\s-]?ray\b', ' ', s)
 
                         # remove any remaining non-alphanumeric (allow - and space)
                         s = re.sub(r'[^a-z0-9\-\s]', ' ', s)
