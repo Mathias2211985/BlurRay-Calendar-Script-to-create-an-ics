@@ -10,6 +10,7 @@ Durchsucht [bluray-disc.de](https://bluray-disc.de) nach Neuerscheinungen und er
 - **Flexible Filter**: Kalender-Jahre, Release-Jahre, Produktions-Jahre, Monate
 - **Kategorie-Erkennung**: filtert automatisch falsche Kategorien heraus (z.B. keine Serien bei 4K-Suche)
 - **Deduplizierung**: erkennt Mehrfach-Editionen (Steelbook, Mediabook, ...) und behaelt nur einen Eintrag
+- **Kategorie-uebergreifende Duplikaterkennung**: optionaler Toggle in der Vorschau, der identische Titel ueber Kategorien hinweg erkennt (z.B. gleicher Film in 4K UHD und Blu-ray) und niedrigere Formate automatisch abwaehlt
 - **CLI-Modus**: volle Kontrolle ueber Kommandozeile fuer Automatisierung
 
 ## Schnellstart
@@ -58,6 +59,7 @@ Die Web-UI bietet:
 - **Ausgabedatei**: Konfigurierbares Namensmuster mit Platzhaltern
 - **Live-Log**: Echtzeit-Ausgabe via Server-Sent Events (rechte Spalte)
 - **Vorschau-Tabelle**: alle gefundenen Eintraege mit Checkboxen zur Auswahl vor der ICS-Erstellung
+- **Duplikate markieren**: Toggle-Option in der Vorschau-Toolbar -- erkennt gleiche Filme ueber Kategorien hinweg und waehlt automatisch das niedrigere Format ab (Prioritaet: 4K UHD > Blu-ray > 3D > Serien > Importe)
 - **Download**: ICS-Datei direkt im Browser herunterladen
 
 Einstellungen werden automatisch in `config.json` gespeichert.

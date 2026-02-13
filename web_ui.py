@@ -342,6 +342,15 @@ HTML_TEMPLATE = r"""
     color: var(--accent); text-decoration: none;
   }
   .preview-table .title-link:hover { text-decoration: underline; }
+  .preview-table tr.duplicate td { background: rgba(251,191,36,0.07); }
+  .preview-table tr.duplicate .dup-badge {
+    display: inline-block; font-size: 0.65rem; font-weight: 700;
+    background: rgba(251,191,36,0.18); color: var(--warn); border-radius: 4px;
+    padding: 1px 6px; margin-left: 8px; vertical-align: middle;
+  }
+  .preview-table .dup-badge { display: none; }
+  .dedup-toggle { display: flex; align-items: center; gap: 6px; cursor: pointer; font-size: 0.78rem; color: var(--text-muted); }
+  .dedup-toggle input { accent-color: var(--warn); width: 14px; height: 14px; cursor: pointer; }
 
   .download-row { display: none; margin-top: 14px; gap: 10px; flex-wrap: wrap; }
   .download-row.visible { display: flex; }
@@ -505,6 +514,7 @@ HTML_TEMPLATE = r"""
       <div class="preview-toolbar">
         <button class="preview-btn" onclick="selectAllPreview(true)">Alle</button>
         <button class="preview-btn" onclick="selectAllPreview(false)">Keine</button>
+        <label class="dedup-toggle"><input type="checkbox" id="dedup-toggle" onchange="toggleDedup(this.checked)"> Duplikate markieren</label>
         <span class="count" id="preview-count"></span>
         <button class="preview-btn primary" onclick="generateICS()">ICS erstellen</button>
       </div>
@@ -776,7 +786,7 @@ function showPreview(items) {
     const catStr = item.category || "";
     tr.innerHTML =
       '<td class="col-cb"><input type="checkbox" checked data-idx="' + idx + '" onchange="onPreviewCheck(this)"></td>' +
-      '<td><a class="title-link" href="' + (item.url || '#') + '" target="_blank" rel="noopener">' + escHtml(item.title || "Unbekannt") + '</a></td>' +
+      '<td><a class="title-link" href="' + (item.url || '#') + '" target="_blank" rel="noopener">' + escHtml(item.title || "Unbekannt") + '</a><span class="dup-badge">Duplikat</span></td>' +
       '<td class="col-date">' + dateStr + '</td>' +
       '<td class="col-year">' + prodStr + '</td>' +
       '<td class="col-cat">' + escHtml(catStr) + '</td>';
@@ -815,6 +825,81 @@ function updatePreviewCount() {
   const total = document.querySelectorAll("#preview-body input[type=checkbox]").length;
   const checked = document.querySelectorAll("#preview-body input[type=checkbox]:checked").length;
   document.getElementById("preview-count").textContent = checked + " / " + total + " ausgewählt";
+}
+
+// ---- Cross-category dedup logic ----
+function normalizeTitle(t) {
+  if (!t) return "";
+  var s = t.toLowerCase();
+  // normalize German umlauts
+  s = s.replace(/ä/g,'ae').replace(/ö/g,'oe').replace(/ü/g,'ue').replace(/ß/g,'ss');
+  // remove parenthetical and bracketed parts
+  s = s.replace(/\([^)]*\)/g, ' ').replace(/\[[^\]]*\]/g, ' ');
+  // remove known edition/format tokens
+  var tokens = ['limited','steelbook','mediabook','wattierte','amaray','cover','edition',
+    'uhd','blu-ray','blu ray','soundtrack','cd','deluxe','collector','exclusive','special'];
+  tokens.forEach(function(tok) { s = s.replace(new RegExp('\\b' + tok.replace(/[.*+?^${}()|[\]\\]/g,'\\$&') + '\\b','g'), ' '); });
+  // remove numeric-k tokens
+  s = s.replace(/\b\d+k\b/g, ' ');
+  // normalize blu-ray variants
+  s = s.replace(/\bblu[\s-]?ray\b/g, ' ');
+  // remove non-alphanumeric (keep - and space)
+  s = s.replace(/[^a-z0-9\-\s]/g, ' ');
+  // collapse whitespace
+  s = s.replace(/[-\s]+/g, ' ').trim();
+  return s;
+}
+
+var CAT_PRIORITY = {"4K UHD":0, "Blu-ray Filme":1, "3D Blu-ray":2, "Serien":3, "Importe":4};
+
+function toggleDedup(on) {
+  if (on) markDuplicates();
+  else clearDuplicateMarks();
+}
+
+function markDuplicates() {
+  var items = window._previewItems;
+  if (!items || items.length === 0) return;
+  // Group by normalized title
+  var groups = {};
+  items.forEach(function(item, idx) {
+    var key = normalizeTitle(item.title);
+    if (!groups[key]) groups[key] = [];
+    groups[key].push(idx);
+  });
+  var rows = document.querySelectorAll("#preview-body tr");
+  // For each group with >1 entry, keep the best and mark the rest as duplicates
+  Object.keys(groups).forEach(function(key) {
+    var idxs = groups[key];
+    if (idxs.length <= 1) return;
+    // Find the best: lowest category priority, then earliest date
+    idxs.sort(function(a, b) {
+      var catA = CAT_PRIORITY[items[a].category] !== undefined ? CAT_PRIORITY[items[a].category] : 99;
+      var catB = CAT_PRIORITY[items[b].category] !== undefined ? CAT_PRIORITY[items[b].category] : 99;
+      if (catA !== catB) return catA - catB;
+      var dA = items[a].release_date || "9999";
+      var dB = items[b].release_date || "9999";
+      return dA < dB ? -1 : dA > dB ? 1 : 0;
+    });
+    // First is best, rest are duplicates
+    for (var i = 1; i < idxs.length; i++) {
+      var row = rows[idxs[i]];
+      if (!row) continue;
+      row.classList.add("duplicate");
+      var cb = row.querySelector("input[type=checkbox]");
+      if (cb) { cb.checked = false; row.classList.add("unchecked"); }
+    }
+  });
+  updatePreviewCount();
+}
+
+function clearDuplicateMarks() {
+  document.querySelectorAll("#preview-body tr.duplicate").forEach(function(row) {
+    row.classList.remove("duplicate");
+    var cb = row.querySelector("input[type=checkbox]");
+    if (cb) { cb.checked = true; row.classList.remove("unchecked"); }
+  });
+  updatePreviewCount();
 }
 
 function generateICS() {
